@@ -342,10 +342,10 @@ def day_spec():
         },
         "timeline": [
             {"time": "9:30 AM", "course_class": "cmsc", "course_label": "CMSC001",
-             "title": "Object-Oriented Programming I", "location": "IRB 0324"},
+             "title": "Intro to Programming", "location": "IRB 0324"},
             {"gap": "15 minutes, IRB to Kirwan Hall", "tight": True},
             {"time": "11:00 AM", "course_class": "math", "course_label": "MATH001",
-             "title": "Calculus II", "location": ""},
+             "title": "Calculus", "location": ""},
         ],
         "sections": {
             "assignments": [
@@ -584,7 +584,7 @@ check("check 27 fails campus rows over the run's cap",
 
 # --- calendar --------------------------------------------------------------
 check("today's calendar renders as a time panel with its tight gap",
-      "Object-Oriented Programming I" in sec("section-schedule")
+      "Intro to Programming" in sec("section-schedule")
       and 't-note tight">15 min between IRB and Kirwan Hall' in sec("section-schedule"))
 check("What changed renders per course with its summary",
       'class="chg-course" data-seen="2026-09-07"' in sec("section-changes")

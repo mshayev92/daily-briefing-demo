@@ -20,7 +20,7 @@ STATE = {
             "ECON001": "Econ",
             "ENGL001": "English",
             "MATH001": "Math",
-            "PHIL001": "AI & Ethics",
+            "PHIL001": "Ethics",
         }
     },
 }
@@ -33,7 +33,7 @@ def test_normalize_course_accepts_spaced_canonical_codes():
 
 def test_normalize_course_preserves_existing_nickname_and_advising_behavior():
     assert orchestrator._normalize_course("Math", STATE) == "MATH001"
-    assert orchestrator._normalize_course("AI & Ethics", STATE) == "PHIL001"
+    assert orchestrator._normalize_course("Ethics", STATE) == "PHIL001"
     assert orchestrator._normalize_course("CS", STATE) == "CMSC001"
     assert orchestrator._normalize_course("CS", STATE, "advising") == "CS-Advising"
 
