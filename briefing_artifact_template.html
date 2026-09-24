@@ -1,0 +1,3079 @@
+<title>{{ARTIFACT_TITLE}}</title>
+
+<!--
+  ============================================================================
+  UMD DAILY BRIEFING — PAGE TEMPLATE
+  Rebuilt 2026-09-17 to the "Daily Briefing — reimagined" design canvas
+  (claude.ai artifact RigUM5cJpZovhuixWE9wNq, boards Desktop and Mobile).
+  Every size, colour and spacing value below is taken from that canvas; when
+  the two disagree, the canvas wins.
+  ============================================================================
+
+  NOTE: angle-bracketed tags belong in exactly TWO places — real markup, and
+  the BEGIN/END row templates below, which the renderer copies out verbatim AS
+  markup. Everywhere else — this header, CSS comments, JS comments — tag names
+  are written bare, because the renderer and the gate both regex for real tags.
+  Placeholder tokens likewise: the double-brace form lives only in this
+  header's contract list, the markup and the row templates.
+
+  THIS FILE IS PAGE CONTENT, NOT A DOCUMENT. service/app.py supplies the
+  doctype/head/body wrapper and the viewport meta tag. Do not add one.
+
+  RENDER BY SPLICING THIS FILE (render_briefing.build). The style block and
+  ALL FOUR script blocks come through byte-identical; gate check 10 compares
+  them. Blocks, in file order: bootstrap + URL gate + Done/Resolved, row menu
+  + detail + AI actions, pane/print helper, brief preferences.
+
+  PAGE ORDER (the design's, top to bottom)
+    masthead           eyebrow, weather line, date, TLDR, change strip, pills
+    Today — Due         obligations dated today, as two-up cards (homework,
+                        exams, and any other due-today item — not only
+                        Canvas "assignment" objects; see ACTION_TAG below)
+    Today — on your calendar   class + personal calendar (only when non-empty)
+    Today — around campus  campus events, grouped Midday / Evening / by day
+    This week          the next five days as day columns
+    Needs your attention   attention cards (+ the System disclosure)
+    Where you stand    next thing per course. Compact summary rows (.tbl-row,
+                        data-ref not data-item-id, §16b) with their own
+                        Mark done/Resolved/Open/Show-detail menu, echoing the
+                        SAME item elsewhere on the page rather than a second
+                        independent row (gate check 16 accounts for the echo)
+    Further out        obligations past the five-day window (only when any);
+                        a pure-FYI event/advising row (lifecycle.is_fyi())
+                        is demoted into its own disclosed secondary list —
+                        same "demoted, not dropped" treatment as Coming up
+                        and Needs your attention's own overflow
+    Leads / Opportunities / What I can't see   (each only when non-empty)
+    footer
+
+  Which section a row lands in is decided by its DATE in render_briefing.
+  build(); WHAT the row can do (Mark done, Add reminder, AI actions…) is
+  still decided by the row template for the pipeline bucket it came from, and
+  that bucket is stamped on the row as data-kind so the gate can check it.
+
+  PLACEHOLDERS (complete; nothing else is one)
+    {{ARTIFACT_TITLE}}    "UMD Daily Briefing — September 7, 2026"
+    {{WEEKDAY}}           "Monday" (no trailing comma — the template has it)
+    {{WEEKDAY_SHORT}}     "Mon" — the phone masthead. Derived by build().
+    {{MONTH_DAY}}         "September 7" (no leading comma)
+    {{WEATHER_LINE}}      top-right masthead eyebrow; line deleted when absent
+    {{TLDR}}              one sentence, <=200 chars
+    {{CHANGE_STRIP}}      whole div deleted when absent (§5.0)
+    {{TODAY_COUNT_LABEL}} "2 items"      (build)
+    {{CAMPUS_HEADING}}    "Today — around campus" / "This week — around campus" (build)
+    {{WEEK_RANGE}}        "Fri – Wed"    (build)
+    {{ATTENTION_COUNT}}   "3"            (build)
+    {{ATTENTION_MORE_LABEL}}  disclosure summary; whole details deleted when absent
+    {{FURTHER_RANGE}}     "3 items · through Oct 17"   (build)
+    {{FURTHER_MORE_LABEL}}    disclosure summary; whole details deleted when absent
+    {{WEEK_STAMP}}        "Rebuilt Mon, Sep 7" — leads/opportunities eyebrow
+    {{RUN_SHORT}}         "9/17"         (build)
+    {{TIME_LABEL}}        "Generated 7:02 AM ET · Mon, Sep 7"
+    {{STATUS_LABEL}}      "12 emails sorted · filing on"
+    Row placeholders — see the row templates: ITEM_ID, EXPAND_CONTEXT,
+    COURSE_CLASS, COURSE_LABEL, TITLE, DETAIL, DUE_FLAG_TEXT, DAYS_OUT_META,
+    CANVAS_URL, ADD_REMINDER_URL, CONFIDENCE, BASIS_ITEMS, CONFIRM_ACTION,
+    KILL_CRITERIA, ACT_BY_LINE, SOURCE_URL, ACTION_TAG, OPP_META,
+    INELIGIBLE_NOTE, COURSE, PATTERN_SLUG, GROUP_DATES, TEXT, WHEN.
+    ACTION_TAG — assignment/assessment rows only (lifecycle.action_tag());
+    line deleted when empty, same as every other conditional row line.
+    SOURCE_URL — filled ONLY as a fallback when canvas_url is empty
+    (orchestrator._fallback_source_url()); an item with a real canvas_url
+    never renders both links.
+  ============================================================================
+-->
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@500;600&display=swap" rel="stylesheet">
+
+<style>
+  /* Tokens: the design canvas's own. The secondary names (rule, ink-soft,
+     paper-sunk …) are kept because the dialogs, menus and preferences form
+     are styled with them; they now resolve onto the canvas palette. */
+  :root {
+    color-scheme: light;
+    --ink: #1B1F2A;
+    --cream: #FBFAF7;
+    --paper: #F3F1EA;
+    --line: #E4E0D3;
+    --line-2: #D8D3C4;
+    --muted: #6B6558;
+    --text-on-ink: #F3EFE6;
+    --text-on-ink-muted: #A9A395;
+    --accent: #D8672E;
+    --accent-ink: #8A3B18;
+    --accent-soft: #F5E1D2;
+    --serif: 'Newsreader', Georgia, serif;
+    --sans: 'Public Sans', system-ui, -apple-system, sans-serif;
+    --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', monospace;
+
+    --card: #FFFFFF;
+    --rule: var(--line);
+    --paper-sunk: #ECE9E0;
+    --paper-press: #E3DFD3;
+    --ink-soft: #4E4A41;
+    --ink-faint: var(--muted);
+    --urgent: var(--accent-ink);
+    --alert: #7A5A1E;
+    --c-econ: #3D6B24;
+    --focus: var(--ink);
+    /* The dark surfaces (masthead, exam day). Its own token because --ink
+       is the TEXT colour, which turns light in dark mode. */
+    --ink-surface: #1B1F2A;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--cream); }
+  body { font-family: var(--sans); color: var(--ink); -webkit-text-size-adjust: 100%; }
+  h1, h2, h3, p { margin: 0; }
+  button:focus-visible, a:focus-visible, input:focus-visible,
+  textarea:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
+  }
+
+  .page { width: 100%; background: var(--cream); font-family: var(--sans); color: var(--ink); }
+  .eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.09em; text-transform: uppercase; font-weight: 500; }
+  .m-only { display: none; }
+
+  /* ---------------- masthead ---------------- */
+  .mast { width: 100%; background: var(--ink-surface); color: var(--text-on-ink); --focus: var(--text-on-ink); }
+  /* content-box on purpose: the canvas measures 1040px INSIDE the 40px padding. */
+  .mast-in { box-sizing: content-box; max-width: 1040px; margin: 0 auto; padding: 44px 40px 38px; display: flex; flex-direction: column; gap: 18px; }
+  .mast-top { display: flex; align-items: baseline; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+  .mast .eyebrow { color: var(--text-on-ink-muted); }
+  .date { font-family: var(--serif); font-size: 26px; font-weight: 500; font-style: italic; color: var(--text-on-ink-muted); line-height: 1.2; }
+  .tldr { font-family: var(--serif); font-size: 34px; line-height: 1.28; font-weight: 500; max-width: 820px; color: var(--text-on-ink); text-wrap: pretty; }
+  .changes { font-family: var(--mono); font-size: 12px; color: var(--text-on-ink-muted); }
+  .pills { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 6px; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--mono); font-size: 11.5px; font-weight: 600; letter-spacing: 0.02em;
+    padding: 3px 9px; border-radius: 100px; white-space: nowrap; line-height: normal;
+  }
+  .mast .pill { background: rgba(255,255,255,0.08); color: var(--text-on-ink); }
+  .mast .pill.is-accent { background: var(--accent); color: #fff; }
+
+  /* ---------------- body column ---------------- */
+  .wrap { box-sizing: content-box; max-width: 1040px; margin: 0 auto; padding: 0 40px; }
+  .section { padding-top: 40px; }
+  .section:first-child { padding-top: 44px; }
+  #section-campus { padding-top: 34px; }
+  .sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
+  #section-campus .sec-head, #section-schedule .sec-head { margin-bottom: 14px; }
+  .section-label { font-family: var(--serif); font-size: 15px; font-style: italic; font-weight: 500; color: var(--muted); }
+  #section-attention .section-label { color: var(--accent-ink); }
+  .sec-head .eyebrow { color: var(--muted); white-space: nowrap; }
+  .empty-note { font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--muted); }
+  .section.is-empty .sec-head { margin-bottom: 8px; }
+
+  /* course pills — the canvas's colours, one pair per course */
+  .course-tag {
+    display: inline-flex; align-items: center; font-family: var(--mono); font-size: 11.5px; font-weight: 600;
+    letter-spacing: 0.02em; padding: 3px 9px; border-radius: 100px; white-space: nowrap; line-height: normal;
+  }
+  .engl     { background: #E3F1EE; color: #1F6B5C; }
+  .econ     { background: #E9F2E3; color: #3D6B24; }
+  .math     { background: #F5E9F2; color: #7A3B63; }
+  .phil     { background: #F5EBD2; color: #7A5A1E; }
+  .cmsc     { background: #E7E9F7; color: #38408A; }
+  .advising { background: #F7E7EC; color: #8A3550; }
+  .umd, .personal { background: #EEECE5; color: #56514A; }
+  .none     { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-2); }
+
+  /* ---------------- rows: shared ---------------- */
+  /* .tbl-row shares .row's action-menu affordance (§16b, 2026-09-18): Where
+     you stand's compact summary rows carry the SAME three-dot menu, so they
+     need the SAME positioning context and hover/focus reveal .row already
+     has -- see .tbl .row-actions below for the one further tweak (top/right
+     instead of bottom) that already anticipated a .row-actions living
+     inside a bare .tbl-row, not only inside .tbl .row. */
+  .row, .tbl-row { position: relative; }
+  /* !important: every container restyles .row's own `display` (.cards
+     .row: grid, .attn .row: flex, .tbl-row: grid, ...) at the SAME
+     specificity (two classes) and LATER in the cascade, so plain
+     `display: none` here lost to every one of them -- Mark done/Resolved
+     wrote the class, and the row just sat there anyway. Found 2026-09-19
+     chasing why bulk-resolve looked like it did nothing; not new, not
+     scoped to attention rows -- .cards .row (Mark done) had the identical
+     bug. Same fix this file already uses for "no container gets to
+     override this" (.d-only). */
+  .row.is-done, .wk-group.is-done, .t-row.is-done, .tbl-row.is-done, details.more.is-done { display: none !important; }
+  .row-new { display: none; }
+  .row-detail:empty { display: none; }
+  .row-actions { position: absolute; right: 10px; bottom: 10px; z-index: 5; }
+  .act {
+    font-family: var(--sans); font-size: 12px; font-weight: 500; color: var(--ink-soft);
+    background: var(--paper-sunk); border: 1px solid var(--rule); border-radius: 6px;
+    padding: 6px 10px; min-height: 32px; cursor: pointer; white-space: nowrap;
+  }
+  .act:hover { background: var(--paper-press); }
+  .act:disabled { opacity: 0.5; cursor: default; }
+  .act-menu {
+    width: 30px; height: 26px; min-height: 0; padding: 0; line-height: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--cream); color: var(--muted); opacity: 0; transition: opacity 120ms;
+  }
+  .act-menu svg { width: 14px; height: 14px; }
+  .row:hover .act-menu, .row:focus-within .act-menu,
+  .tbl-row:hover .act-menu, .tbl-row:focus-within .act-menu,
+  .act-menu[aria-expanded="true"] { opacity: 1; }
+  @media (hover: none) { .row:hover .act-menu, .tbl-row:hover .act-menu { opacity: 0; } }
+  .row[data-item-id]:not([data-item-id^="group-"]), .tbl-row[data-ref] { cursor: pointer; }
+  .row-menu {
+    position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; min-width: 184px; padding: 4px;
+    background: var(--cream); border: 1px solid var(--line); border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(27,31,42,0.06), 0 10px 24px rgba(27,31,42,0.12); cursor: default;
+  }
+  /* Inserted at runtime, one per .row-menu (script block 2) -- see the
+     comment there. Off everywhere but the phone action-sheet breakpoint,
+     where .row-menu stops being a dropdown next to its own trigger. */
+  .row-menu-close { display: none; }
+  .menu-item {
+    display: flex; align-items: center; width: 100%; text-align: left;
+    font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--ink);
+    background: none; border: 0; border-radius: 5px; padding: 0 10px; min-height: 40px;
+    cursor: pointer; white-space: nowrap; text-decoration: none;
+  }
+  .menu-item:hover { background: var(--paper); }
+  .menu-item:disabled { opacity: 0.5; cursor: default; }
+  .menu-rate { display: flex; align-items: center; gap: 4px; margin-top: 4px; padding: 6px 10px 2px; border-top: 1px solid var(--line); }
+  .menu-rate-lbl { flex: 1; font-size: 11px; color: var(--muted); }
+  .rate { flex: none; width: 28px; height: 26px; padding: 0; cursor: pointer; border: 1px solid transparent; border-radius: 5px; background: none; font-size: 13px; line-height: 1; filter: grayscale(1) opacity(0.55); }
+  .rate:hover { background: var(--paper); filter: grayscale(0.4) opacity(0.9); }
+  .rate[aria-pressed="true"] { filter: none; background: var(--paper); border-color: var(--line); }
+  .rate:disabled { cursor: default; opacity: 0.4; }
+  .row-menu[hidden], .row-expand[hidden], .page-expand[hidden] { display: none; }
+  .row-expand, .page-expand {
+    grid-column: 1 / -1; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line);
+    font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; white-space: pre-wrap; cursor: auto;
+  }
+  .row-expand.is-loading, .page-expand.is-loading { font-style: italic; color: var(--muted); }
+  .row-expand.is-error, .page-expand.is-error { color: var(--urgent); font-style: italic; }
+  .ai-label { display: block; margin-bottom: 4px; font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); white-space: normal; }
+  .ai-regen { margin-left: 8px; padding: 0; border: 0; background: none; cursor: pointer; font-family: var(--mono); font-size: 11px; text-transform: uppercase; color: var(--muted); text-decoration: underline; }
+  .fmt { white-space: normal; }
+  .fmt-h { font-weight: 700; color: var(--ink); margin: 10px 0 4px; }
+  .fmt-h:first-child { margin-top: 0; }
+  .fmt-p { margin: 0 0 8px; }
+  .fmt-p:last-child { margin-bottom: 0; }
+  .fmt-ul { margin: 0 0 8px; padding-left: 18px; }
+  .fmt-ul li { margin: 0 0 3px; }
+  .fmt strong { font-weight: 600; color: var(--ink); }
+  /* Was display:none unconditionally -- "Plan my week" had no working
+     backend (§6.5's `sample` capability, never wired for this hosting) so
+     it stayed hidden rather than sit as a dead control. Real now
+     (service/app.py's POST /ai/week), so it renders. */
+  .page-actions { display: block; margin: 32px 0 0; padding-top: 24px; border-top: 1px dashed var(--line); }
+
+  /* ---------------- Today — Due: two-up cards ---------------- */
+  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .cards .row {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px;
+    display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 12px; row-gap: 10px; align-content: start;
+  }
+  .cards .row > div:first-child, .cards .row-title { display: contents; }
+  .cards .course-tag { grid-row: 1; grid-column: 1; justify-self: start; align-self: center; }
+  /* row-meta sits in the flexible second column (not `auto`, which used to
+     hold it to its full nowrap width and force the course-tag's own
+     minmax(0, 1fr) column to shrink under it -- pill and due text then
+     overlapped instead of the meta text wrapping, worst on tablet/phone
+     widths where a card's content box is a few hundred px, not desktop's
+     ~700px two-up column). min-width: 0 lets it actually shrink to that
+     column instead of holding out for its own min-content. */
+  .cards .row-meta { grid-row: 1; grid-column: 2; min-width: 0; align-self: center; font-family: var(--mono); font-size: 12px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent-ink); font-weight: 500; white-space: normal; }
+  .cards .due-flag { font-weight: 500; }
+  /* action-tag ("Submit" / "In-class, nothing to upload" / "No submission
+     required" / "Take it", lifecycle.action_tag()) reads as a hint, not an
+     alert -- always muted, even inside .cards where .row-meta itself is the
+     urgent due-flag colour. */
+  .action-tag { color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: normal; }
+  .action-tag:empty { display: none; }
+  /* .action-tag shares .row-meta's line with due-flag/days-out with no
+     separator in the markup (render_briefing.build_row) -- without this the
+     two runs of text visually concatenate, e.g. "2:00 PMIn-class...". */
+  .action-tag:not(:empty)::before { content: " \00b7 "; }
+  .cards .row-name { grid-row: 2; grid-column: 1 / -1; font-size: 19px; font-weight: 600; line-height: 1.3; }
+  .cards .row-detail { grid-row: 3; grid-column: 1 / -1; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  .cards .row-expand { grid-row: 4; }
+
+  /* ---------------- time panels: calendar + campus ---------------- */
+  /* No `overflow: hidden` (same reason as .tbl below): a row's menu opens
+     below the row and was clipped at the panel's edge. Nothing inside paints
+     a background, so the rounded corners never needed the clip. */
+  .panel { background: var(--paper); border: 1px solid var(--line); border-radius: 10px; }
+  .t-group { padding: 16px 20px 8px; color: var(--muted); }
+  .t-group:first-child { padding-top: 14px; }
+  .t-row { position: relative; display: grid; grid-template-columns: 96px 1fr; gap: 14px; padding: 11px 20px; align-items: baseline; border-top: 1px solid var(--line); }
+  .t-row:last-child { padding-bottom: 15px; }
+  .t-time { font-family: var(--mono); font-size: 13px; color: var(--muted); white-space: nowrap; }
+  .t-short { display: none; }
+  .t-title { font-size: 14px; font-weight: 500; }
+  .t-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .t-title .course-tag { margin-right: 8px; font-size: 11px; padding: 2px 8px; vertical-align: 1px; }
+  .t-note { font-size: 12.5px; font-style: italic; color: var(--muted); }
+  .t-note.tight { font-style: normal; font-weight: 600; color: var(--accent-ink); }
+  .times .row { min-width: 0; }
+  .times .row .course-tag, .times .row-meta { display: none; }
+  .times .row-name { font-size: 14px; font-weight: 500; }
+  .times .row-detail { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .times .row-actions { right: -8px; bottom: auto; top: -3px; }
+
+  /* ---------------- This week: day columns ---------------- */
+  .week { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; }
+  .wk-day { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 14px; display: flex; flex-direction: column; gap: 10px; min-height: 150px; }
+  .wk-day > .eyebrow { color: var(--muted); }
+  .wk-day.is-empty, .wk-day.is-cleared { background: var(--paper); border: 1px dashed var(--line-2); justify-content: space-between; }
+  .wk-day.is-cleared .wk-group { display: none; }
+  .wk-none { display: none; font-family: var(--serif); font-size: 13px; font-style: italic; color: var(--muted); }
+  .wk-day.is-empty .wk-none, .wk-day.is-cleared .wk-none { display: block; }
+  .wk-day.is-exam { background: var(--ink-surface); border-color: var(--ink-surface); color: var(--text-on-ink); --focus: var(--text-on-ink); }
+  .wk-day.is-exam > .eyebrow { color: var(--text-on-ink-muted); }
+  .wk-group { position: relative; display: flex; flex-direction: column; gap: 10px; align-items: flex-start; }
+  .wk-date { display: none; }
+  .wk-group > .course-tag { align-self: flex-start; }
+  .wk-group.is-exam > .course-tag { background: var(--accent); color: #fff; box-shadow: none; }
+  .wk-items { font-size: 13px; font-weight: 500; line-height: 1.4; }
+  .wk-items .row, .wk-items .row > div:first-child, .wk-items .row-title { display: inline; }
+  .wk-items .row { position: static; }
+  .wk-items .row + .row::before { content: " · "; }
+  .wk-items .course-tag, .wk-items .row-meta, .wk-items .row-detail { display: none; }
+  .wk-items .row-actions { position: absolute; left: 0; right: auto; top: 100%; bottom: auto; }
+  .wk-items .act-menu { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+  .wk-items .row-menu { top: 4px; left: 0; right: auto; }
+  .wk-group.is-exam .wk-items { font-size: 14px; font-weight: 600; }
+  .wk-group.is-exam .row-detail { display: block; margin-top: 10px; font-size: 12px; font-weight: 400; color: var(--text-on-ink-muted); line-height: 1.4; }
+  .wk-group.is-exam .menu-item, .wk-group.is-exam .row-menu { color: var(--ink); }
+
+  /* ---------------- Needs your attention ---------------- */
+  .attn { display: flex; flex-direction: column; gap: 10px; }
+  .attn .row { background: var(--accent-soft); border: 1px solid #E9BE9E; border-radius: 10px; padding: 15px 18px; display: flex; align-items: center; gap: 16px; }
+  .attn .row::before { content: ""; width: 8px; height: 8px; border-radius: 100px; background: var(--accent); flex-shrink: 0; }
+  .attn .row > div:first-child { flex-grow: 1; min-width: 0; }
+  .attn .course-tag { display: none; }
+  .attn .row-name { font-size: 14px; font-weight: 600; }
+  .attn .row-detail { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .attn .row-actions { top: 50%; bottom: auto; transform: translateY(-50%); }
+  .attn .act-menu { background: var(--accent-soft); }
+  .attn .row-expand { flex-basis: 100%; }
+  /* Bulk-resolve (2026-09-19): checkbox is the row's new first flex child,
+     ahead of the ::before dot, so it reads left-to-right as select → status
+     → content rather than crowding the course-tag-less title. */
+  .attn .row > .attn-select { flex-shrink: 0; }
+  .attn-select { width: 16px; height: 16px; accent-color: var(--accent-ink); cursor: pointer; }
+  .attn-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0 0 10px; font-family: var(--sans); font-size: 12.5px; color: var(--ink-soft); }
+  .attn-bulk-all { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+  .attn-bulk-count { color: var(--muted); }
+  .more { margin-top: 12px; }
+  .more > summary { display: inline-flex; cursor: pointer; list-style: none; font-family: var(--mono); font-size: 12px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); padding: 4px 0; }
+  .more > summary::-webkit-details-marker { display: none; }
+  .more > summary:hover { color: var(--ink); }
+  .more[open] > summary { margin-bottom: 10px; }
+  .more .more-shut, .more[open] .more-open { display: none; }
+  .more[open] .more-shut { display: inline; }
+  .more .attn { gap: 10px; }
+
+  /* ---------------- Where you stand / Further out: tables ---------------- */
+  /* No `overflow: hidden` here (there was, until 2026-09-19): every .tbl-row
+     carries a .row-menu dropdown that opens BELOW the row via `position:
+     absolute` (§ .row-menu below), and an overflow-hidden ancestor clips
+     that dropdown at the table's own edge -- for any row other than the
+     first it renders as a one-pixel sliver instead of a menu. Rows paint no
+     background/border of their own (only .tbl does), so there is nothing
+     square-cornered for overflow to have been clipping in the first place;
+     the rounded corners are recreated below by radiusing the first/last
+     child directly instead. */
+  .tbl { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+  .tbl > *:first-child { border-top-left-radius: 10px; border-top-right-radius: 10px; }
+  .tbl > *:last-child { border-bottom-left-radius: 10px; border-bottom-right-radius: 10px; }
+  /* Right padding leaves room for .row-actions' 30px-wide button (fixed at
+     `right: 8px` regardless of this padding, since it's positioned against
+     the row's own edge, not its content box) so a visible/focused button
+     never sits on top of .tbl-when's right-aligned date text -- found
+     2026-09-19 from a real render where "Wed 10/1" clipped to "Wed 10/"
+     under the button. */
+  .tbl-row, .tbl .row { display: grid; grid-template-columns: 150px 1fr 110px; gap: 14px; padding: 13px 44px 13px 20px; align-items: center; }
+  .tbl > * + * { border-top: 1px solid var(--line); }
+  .tbl-row .course-tag, .tbl .row .course-tag { justify-self: stretch; }
+  .tbl-text { font-size: 13.5px; }
+  .tbl-when { font-family: var(--mono); font-size: 12.5px; color: var(--muted); text-align: right; }
+  .tbl .row > div:first-child, .tbl .row-title { display: contents; }
+  .tbl .row-name { font-size: 13.5px; font-weight: 400; }
+  .tbl .row-detail { display: none; }
+  .tbl .row-meta { font-family: var(--mono); font-size: 12.5px; color: var(--muted); text-align: right; }
+  .tbl .row-actions { right: 8px; bottom: auto; top: 50%; transform: translateY(-50%); }
+  .tbl-note { grid-template-columns: 1fr; font-size: 13.5px; color: var(--ink-soft); }
+  .tbl .row-expand { grid-column: 1 / -1; }
+  /* Further out's right column carries the date AND the action tag ("Fri
+     9/25 · Take it", "In-class, nothing to upload"). In a fixed 110px track
+     it wrapped into three ragged lines per row (2026-09-19 audit): the tag
+     now sits on its own line under the date and the track sizes to it. */
+  .tbl .row { grid-template-columns: 150px 1fr max-content; }
+  .tbl .row-meta { white-space: nowrap; }
+  .tbl .row-meta .action-tag { display: block; font-size: 11.5px; }
+  .tbl .row-meta .action-tag::before { content: none; }
+
+  /* ---------------- Leads / Opportunities / coverage ---------------- */
+  .stack { display: flex; flex-direction: column; gap: 10px; }
+  .stack .row { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; }
+  .stack .row-title { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .stack .row-name { font-size: 16px; font-weight: 600; }
+  .stack .course-tag.none { display: none; }
+  .stack .row-detail { font-size: 13.5px; color: var(--muted); line-height: 1.5; margin-top: 6px; }
+  .stack .row-meta { font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-top: 8px; }
+  .lead-conf { color: var(--accent-ink); }
+  .lead-basis { list-style: none; font-size: 13px; color: var(--ink-soft); margin: 10px 0 0; padding: 10px 12px; line-height: 1.55; background: var(--paper); border-radius: 8px; }
+  .lead-basis li { margin: 0 0 3px; padding-left: 13px; text-indent: -13px; }
+  .lead-basis li:last-child { margin-bottom: 0; }
+  .lead-basis li::before { content: "— "; color: var(--muted); }
+  .lead-basis .basis-src { color: var(--muted); font-style: italic; }
+  .lead-ask { font-size: 13px; color: var(--ink-soft); margin-top: 6px; line-height: 1.5; }
+  .lead-ask b { font-weight: 600; color: var(--ink); }
+  .lead-act { font-family: var(--mono); font-size: 12px; color: var(--accent-ink); margin-top: 8px; }
+  .opp-meta:not(.opp-ineligible) { font-size: 13px; color: var(--ink-soft); margin-top: 8px; line-height: 1.55; padding: 8px 10px; background: var(--paper); border-radius: 8px; }
+  .opp-ineligible { color: var(--accent-ink); font-weight: 600; margin-top: 6px; font-size: 13px; }
+  .coverage-note { font-size: 13.5px; color: var(--ink-soft); line-height: 1.5; padding: 12px 20px; }
+
+  /* ---------------- What changed (brief v2) ---------------- */
+  .chg-panel { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; background: var(--card); }
+  .chg-course { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 14px; padding: 15px 20px; align-items: start; }
+  .chg-course + .chg-course { border-top: 1px solid var(--line); }
+  .chg-course > .course-tag { justify-self: stretch; }
+  .chg-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+  .chg { display: grid; grid-template-columns: 108px minmax(0, 1fr); gap: 10px; align-items: baseline; }
+  .chg-kind { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+  .chg-ann .chg-kind, .chg-moved .chg-kind { color: var(--accent-ink); }
+  .chg-graded .chg-kind { color: var(--c-econ); }
+  .chg-text { font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
+  .chg-text a, .t-link { color: inherit; text-decoration: none; border-bottom: 1px solid var(--line-2); }
+  .chg-text a:hover, .t-link:hover { border-bottom-color: currentColor; }
+  .chg-sum { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin-top: 3px; }
+
+  /* ---------------- Opportunity dossiers (brief v2) ---------------- */
+  .opp-dossier { margin-top: 10px; font-size: 13.5px; line-height: 1.55; color: var(--ink-soft); }
+  .opp-dossier:empty { display: none; }
+  .dos-sum { color: var(--ink); max-width: 72ch; }
+  .dos-note { font-style: italic; color: var(--muted); }
+  .dos-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 10px 0 0; padding: 11px 13px; background: var(--paper); border-radius: 8px; }
+  .dos-facts > div { display: contents; }
+  .dos-facts dt { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding-top: 3px; white-space: nowrap; }
+  .dos-facts dd { margin: 0; overflow-wrap: anywhere; }
+  .dos-facts q { quotes: "\201C" "\201D"; }
+  .dos-fit { margin-top: 10px; font-style: italic; color: var(--ink-soft); }
+  .dos-label { font-style: normal; font-family: var(--mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent-ink); background: var(--accent-soft); border-radius: 4px; padding: 2px 6px; margin-right: 6px; vertical-align: 1px; }
+  .dos-src { margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .dos-src a { color: inherit; }
+  #section-opportunities .stack .row-meta { color: var(--accent-ink); }
+  /* "UMD" on every card says nothing; a course pill still shows. */
+  #section-opportunities .course-tag.umd { display: none; }
+
+  /* ---------------- since you last looked (brief v2) ---------------- */
+  .pill[hidden] { display: none; }
+  .section.is-empty .sec-head .eyebrow, .section.is-empty .section-label .m-only { display: none; }
+  .since { font-family: var(--mono); font-size: 12px; color: var(--text-on-ink); }
+  .since::before { content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent); margin-right: 8px; vertical-align: 1px; }
+  .is-fresh .row-name::before, .t-row.is-fresh .t-title::after, .chg-course.is-fresh > .course-tag::after {
+    content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+  }
+  .is-fresh .row-name::before { margin-right: 8px; vertical-align: 2px; }
+  .t-row.is-fresh .t-title::after { margin-left: 8px; vertical-align: 2px; }
+  .chg-course.is-fresh > .course-tag::after { margin-left: 7px; }
+  @media (prefers-reduced-motion: no-preference) {
+    .is-fresh .row-name::before, .since::before { animation: fresh-in 600ms ease-out both; }
+    @keyframes fresh-in { from { transform: scale(0.2); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    .row.is-done, .tbl-row.is-done { transition: opacity 150ms; }
+  }
+
+  /* generic colour slots for a course the palette above does not name yet */
+  .c1 { background: #E6EEF7; color: #2E5A87; }
+  .c2 { background: #F4E8E1; color: #87492E; }
+  .c3 { background: #ECE8F5; color: #5A4287; }
+  .c4 { background: #E4F0E9; color: #2E6B4A; }
+  .c5 { background: #F5EFD9; color: #7A6320; }
+  .c6 { background: #F2E4EA; color: #7F3350; }
+
+  /* ---------------- footer ---------------- */
+  .footer { font-family: var(--mono); font-size: 11px; color: var(--muted); text-align: center; margin-top: 28px; padding-bottom: 56px; display: flex; flex-direction: column; gap: 6px; align-items: center; }
+  .footer .status { color: var(--muted); }
+  .linkbtn { font: inherit; color: var(--muted); background: none; border: 0; padding: 4px 2px; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .linkbtn:hover { color: var(--ink); }
+
+  /* ---------------- dialogs + preferences form ---------------- */
+  .sheet {
+    width: min(560px, calc(100vw - 32px)); max-height: min(78vh, 720px); padding: 0;
+    border: 1px solid var(--line); border-radius: 10px; background: var(--cream); color: var(--ink);
+    box-shadow: 0 4px 12px rgba(27,31,42,0.10), 0 24px 60px rgba(27,31,42,0.16); overflow: hidden;
+  }
+  .sheet[open] { display: flex; flex-direction: column; }
+  .sheet::backdrop { background: rgba(27,31,42,0.4); }
+  .sheet-head { flex: none; display: flex; align-items: center; gap: 12px; padding: 16px 18px 12px; border-bottom: 1px solid var(--line); background: var(--cream); }
+  .sheet-title { flex: 1; font-family: var(--serif); font-size: 18px; font-weight: 500; line-height: 1.3; }
+  .sheet-sub { margin-top: 2px; font-family: var(--sans); font-size: 12.5px; color: var(--muted); font-weight: 400; }
+  .sheet-close { flex: none; width: 30px; height: 30px; padding: 0; cursor: pointer; border: 1px solid var(--line); border-radius: 6px; background: var(--cream); font-family: var(--sans); font-size: 15px; line-height: 1; color: var(--ink-soft); }
+  .sheet-close:hover { background: var(--paper); color: var(--ink); }
+  .sheet-body { flex: 1 1 auto; min-height: 0; padding: 16px 18px 18px; overflow-y: auto; }
+  .sheet-body .fmt, .sheet-body .prefs-body { white-space: normal; }
+  .sheet-foot { flex: none; display: flex; align-items: center; gap: 10px; padding: 12px 18px 14px; border-top: 1px solid var(--line); background: var(--paper); }
+  .sheet-foot[hidden] { display: none; }
+  .dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; align-items: baseline; }
+  .dl-k { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); white-space: nowrap; padding-top: 2px; }
+  .dl-v { font-size: 13.5px; line-height: 1.5; color: var(--ink); }
+  .dl-v a { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; word-break: break-word; }
+  .dl-lead { margin: 0 0 14px; padding-bottom: 12px; border-bottom: 1px solid var(--line); font-size: 14px; line-height: 1.55; color: var(--ink); }
+  .dl-links { display: block; margin: 0; padding: 0; list-style: none; }
+  .dl-links li { margin: 0 0 2px; }
+  .prefs-status { font-size: 11px; color: var(--muted); font-style: italic; }
+  .prefs-status.is-error { color: var(--urgent); }
+  .pq { padding: 10px 0; border-bottom: 1px solid var(--line); }
+  .pq:last-of-type { border-bottom: 0; }
+  .pq-label { font-size: 13px; font-weight: 600; line-height: 1.35; }
+  .pq-help { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.4; }
+  .pq-opts { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+  .chip { font-family: var(--sans); font-size: 11.5px; font-weight: 500; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); border-radius: 100px; padding: 4px 10px; cursor: pointer; white-space: nowrap; }
+  .chip:hover { background: var(--paper-press); }
+  .chip[aria-pressed="true"] { background: #E9F2E3; border-color: #BFD6B0; color: #3D6B24; font-weight: 600; }
+  .chip.chip-never[aria-pressed="true"] { background: var(--accent-soft); border-color: #E9BE9E; color: var(--accent-ink); }
+  .pq-tri { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: center; padding: 4px 0; }
+  .pq-tri-name { font-size: 12.5px; color: var(--ink-soft); }
+  .pq-tri-opts { display: flex; gap: 4px; }
+  .pq-text { width: 100%; margin-top: 7px; padding: 7px 8px; font-family: var(--sans); font-size: 13px; line-height: 1.45; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; resize: vertical; }
+  .pq-text:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+  .pq-count { font-size: 11px; color: var(--muted); text-align: right; margin-top: 2px; }
+  .pq-count.is-over { color: var(--urgent); font-weight: 600; }
+  .req { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; margin-top: 8px; background: var(--card); }
+  .req.is-off { opacity: 0.55; }
+  .req-head { display: flex; gap: 6px; align-items: stretch; }
+  .req-head .chip, .req-head .act { margin-top: 0; min-height: 0; display: inline-flex; align-items: center; padding: 0 9px; }
+  .req-stmt { flex: 1 1 auto; font-family: var(--sans); font-size: 12.5px; line-height: 1.4; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 6px 7px; }
+  .req-stmt:focus { outline: 2px solid var(--focus); outline-offset: -1px; }
+  .req-sub { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
+  .req-sub .pq-opts { margin-top: 0; }
+  .req-lbl { font-size: 11px; color: var(--muted); }
+  .req-kw { flex: 1 1 160px; min-width: 120px; font-family: var(--sans); font-size: 11.5px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; }
+  .req-del { flex: none; }
+  .req-add { margin-top: 9px; }
+  .req-empty { font-size: 12.5px; font-style: italic; color: var(--muted); margin-top: 6px; line-height: 1.45; }
+
+  /* ---------------- dark mode (brief v2) ----------------
+     Same design, night palette: the page is often read before sunrise.
+     Tokens are redefined; the few surfaces that use --ink as a BACKGROUND
+     (masthead, exam day) are pinned to a near-black explicitly, because
+     --ink itself becomes the light text colour here. */
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --ink: #ECE7DC; --cream: #14171D; --paper: #252B36; --line: #2A303B; --line-2: #3A4150;
+      --muted: #9C968A; --card: #1B1F27; --paper-sunk: #232833; --paper-press: #2C323E;
+      --ink-soft: #C9C3B6; --accent: #E07A43; --accent-ink: #F2A97E; --accent-soft: #3A2419;
+      --alert: #D9B36B; --c-econ: #A8D48C; --focus: #ECE7DC;
+      --ink-surface: #0B0D12;
+    }
+    .cards .row, .wk-day, .tbl, .stack .row, .chg-panel { background: #1B1F27; }
+    /* --paper is the shaded box INSIDE a card (quoted facts, lead evidence,
+       menu hover), so it must differ from the card itself; empty week days
+       stay recessed like the calendar panel. */
+    .wk-day.is-empty, .wk-day.is-cleared { background: #181B22; }
+    .panel { background: #181B22; }
+    .attn .row { border-color: #6A3A22; }
+    .engl { background: #173430; color: #8FD3C2; }
+    .econ { background: #1F3318; color: #A8D48C; }
+    .math { background: #3A1F31; color: #E3A6CC; }
+    .phil { background: #3A2F14; color: #E3C27A; }
+    .cmsc { background: #22264A; color: #AEB6F2; }
+    .advising { background: #3C1F29; color: #EDA3BA; }
+    .umd, .personal { background: #2A2C31; color: #C3BDB2; }
+    .c1 { background: #1D2A3A; color: #A3C4EA; } .c2 { background: #3A2519; color: #EDB397; }
+    .c3 { background: #282139; color: #C3B2EC; } .c4 { background: #183025; color: #9AD5B3; }
+    .c5 { background: #352D14; color: #E4CD86; } .c6 { background: #3A1C28; color: #EBA7C0; }
+    .chip[aria-pressed="true"] { background: #1F3318; border-color: #3B5A2C; color: #A8D48C; }
+    .row-menu, .sheet { box-shadow: 0 10px 28px rgba(0,0,0,0.55); }
+    .sheet::backdrop { background: rgba(0,0,0,0.6); }
+  }
+
+  /* ---------------- narrower than the five-column week ---------------- */
+  @media (max-width: 860px) {
+    .week { display: flex; flex-direction: column; gap: 8px; }
+    .wk-day { display: contents; }
+    .wk-day > .eyebrow, .wk-day.is-empty, .wk-none, .wk-day.is-cleared .wk-none { display: none; }
+    .wk-group { background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 12px 14px; flex-direction: row; align-items: center; gap: 10px; color: var(--ink); }
+    .wk-date { display: block; color: var(--muted); width: 46px; flex-shrink: 0; }
+    .wk-items { flex-grow: 1; font-size: 12.5px; font-weight: 400; min-width: 0; }
+    .wk-group.is-exam { background: var(--ink-surface); border-color: var(--ink-surface); color: var(--text-on-ink); }
+    .wk-group.is-exam .wk-date { color: var(--text-on-ink-muted); }
+    .wk-group.is-exam .wk-items { font-size: 12.5px; font-weight: 600; }
+    .wk-group.is-exam .row-detail { display: inline; margin: 0; font-size: 12.5px; font-weight: 600; color: var(--text-on-ink); }
+    .wk-group.is-exam .row-detail::before { content: " · "; }
+  }
+
+  /* ---------------- phone: the canvas's Mobile board ---------------- */
+  @media (max-width: 640px) {
+    .d-only { display: none !important; }
+    .m-only { display: inline; }
+    .eyebrow { font-size: 10.5px; letter-spacing: 0.08em; }
+    .mast-in { padding: 28px 20px 26px; gap: 14px; }
+    /* The weather line used to be hidden on phones -- the device the
+       daily email is actually opened on. It now takes its own line. */
+    .mast-top { row-gap: 6px; }
+    .mast-top .eyebrow + .eyebrow { flex-basis: 100%; opacity: 0.85; }
+    .date { font-size: 17px; }
+    .tldr { font-size: 23px; line-height: 1.3; }
+    .pills { gap: 8px; margin-top: 0; }
+    .pill, .course-tag { font-size: 11px; letter-spacing: 0; padding: 3px 8px; }
+    .pill-wide { display: none; }
+    .wrap { padding: 0 18px; }
+    .section, .section:first-child { padding-top: 26px; }
+    #section-campus { padding-top: 24px; }
+    .sec-head, #section-campus .sec-head, #section-schedule .sec-head { margin-bottom: 10px; }
+    .section-label { font-size: 13px; }
+    .sec-head .eyebrow.d-only { display: none; }
+    .cards { display: flex; flex-direction: column; gap: 10px; }
+    .cards .row { padding: 16px; row-gap: 8px; }
+    .cards .row-meta { font-size: 10.5px; letter-spacing: 0.08em; }
+    .cards .row-name { font-size: 16px; }
+    .cards .row-detail { font-size: 12.5px; line-height: 1.45; }
+    .t-group { display: none; }
+    .t-row { grid-template-columns: 66px 1fr; gap: 10px; padding: 11px 16px; }
+    .panel > .t-row:first-child, .panel > .t-group:first-child + .t-row { border-top: 0; }
+    .t-row:last-child { padding-bottom: 13px; }
+    .t-time { font-size: 12px; }
+    .t-long { display: none; }
+    .t-short { display: inline; }
+    .t-title, .times .row-name { font-size: 13px; }
+    .t-title { display: inline; }
+    .t-sub, .times .row-detail:not(:empty) { display: inline; font-size: 13px; color: var(--ink); font-weight: 500; margin: 0; }
+    .t-sub::before, .times .row-detail::before { content: " · "; }
+    .times .row, .times .row > div:first-child, .times .row-title { display: inline; }
+    .wk-items { font-size: 12.5px; }
+    .attn { gap: 8px; }
+    .attn .row { padding: 12px 14px; gap: 10px; align-items: flex-start; }
+    .attn .row::before { width: 7px; height: 7px; margin-top: 5px; }
+    .attn .row-name { font-size: 13px; }
+    .attn .row-detail { display: none; }
+    /* Where you stand is shown on phones too (hidden until 2026-09-19):
+       since grades and trend notes live there, hiding it meant the phone
+       -- the main reading surface -- never showed how a course was going. */
+    .tbl-row, .tbl .row { grid-template-columns: auto 1fr auto; padding: 12px 44px 12px 14px; gap: 10px; }
+    .tbl-text { font-size: 13px; }
+    .tbl .row-meta .action-tag { white-space: normal; max-width: 8.5em; margin-left: auto; font-size: 11px; }
+    .tbl .row .course-tag { justify-self: start; }
+    .chg-course { grid-template-columns: 1fr; gap: 8px; padding: 13px 14px; }
+    .chg-course > .course-tag { justify-self: start; }
+    .chg { grid-template-columns: 1fr; gap: 1px; }
+    .chg-kind { font-size: 10px; }
+    .dos-facts { grid-template-columns: 1fr; gap: 2px; }
+    .dos-facts dd { margin-bottom: 6px; }
+    .footer { font-size: 10px; margin: 30px 0 0; padding-bottom: 34px; }
+    .footer .status { display: none; }
+
+  }
+
+  /* The row-menu action sheet, on phones AND on any touch screen whatever
+     its width: a phone in landscape is wider than 640px, got the desktop
+     dropdown, and the campus panel cut it off (2026-09-22). */
+  @media (max-width: 640px), (hover: none) and (pointer: coarse) {
+    /* row-menu: a real action sheet pinned to the viewport, not the desktop
+       dropdown anchored to the row's (invisible, on touch) act-menu button.
+       Anchored to a corner of the row, the menu (3-5 40px items) is always
+       taller than the 8-14px gap before the next card/row, so it has
+       nowhere to open into and just overlapped whatever came next -- worst
+       here, where every section is single-column full-width cards, not
+       desktop's wider, more spread-out two-up grid. Fixed positioning
+       sidesteps that instead of chasing a per-section anchor tweak.
+       `transform` on .attn/.tbl's .row-actions would otherwise make THEM
+       the fixed-position containing block instead of the viewport. */
+    .attn .row-actions, .tbl .row-actions { transform: none; }
+    .cards .row-menu, .attn .row-menu, .tbl .row-menu, .stack .row-menu,
+    .times .row-menu, .wk-items .row-menu {
+      position: fixed; top: auto; left: 16px; right: 16px; bottom: 16px;
+      width: auto; min-width: 0; max-width: 520px; margin: 0 auto; max-height: 70vh; overflow-y: auto;
+      padding: 44px 8px 10px;
+    }
+    /* The sheet no longer sits next to the button that opened it, so "tap
+       outside to dismiss" is a lot less reachable -- give it its own
+       close button instead of relying on that alone. */
+    .row-menu-close {
+      display: inline-flex; align-items: center; justify-content: center;
+      position: absolute; top: 8px; right: 8px; z-index: 1;
+    }
+  }
+
+  @media print {
+    .row-actions, .page-actions, .more > summary, dialog.sheet { display: none !important; }
+    details.more > * { display: revert; }
+    .mast { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    .row, .wk-day, .t-row { break-inside: avoid; }
+  }
+</style>
+
+<div class="page">
+
+<div class="mast">
+  <div class="mast-in">
+    <div class="mast-top">
+      <span class="eyebrow">Daily Briefing &middot; <span class="d-only">University of Maryland</span><span class="m-only">UMD</span></span>
+      <span class="eyebrow">{{WEATHER_LINE}}</span>
+    </div>
+    <h1 class="date"><span class="d-only">{{WEEKDAY}}</span><span class="m-only">{{WEEKDAY_SHORT}}</span>, {{MONTH_DAY}}</h1>
+    <p class="tldr">{{TLDR}}</p>
+    <!-- CHANGE STRIP (§5.0). render() deletes the whole div when absent. -->
+    <div class="changes">{{CHANGE_STRIP}}</div>
+    <p class="since" data-role="since" hidden></p>
+    <div class="pills">
+      <!-- INSERT MASTHEAD PILLS HERE -->
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <!-- ================================================================
+       ROW TEMPLATES. What a row can DO is decided by the pipeline bucket it
+       came from, so there is one template per bucket; WHERE it renders is
+       decided by its date (render_briefing.build). The same markup is
+       restyled by its container: .cards (today), .times (campus), .wk-items
+       (a day of the week), .attn, .tbl (further out), .stack (leads,
+       opportunities). build_row() stamps data-kind on the row opening tag.
+
+       ONE control per row: the three-dot menu. The design draws no visible
+       button, so the whole row opens that menu on click (script block 2) and
+       the button itself shows on hover and keyboard focus.
+
+    BEGIN ASSIGNMENT ROW TEMPLATE — once per item:
+
+        <div class="row" data-item-id="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+          <div>
+            <div class="row-title"><span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
+            <div class="row-detail">{{DETAIL}}</div>
+            <div class="row-meta"><span class="row-new">New</span><span class="due-flag">{{DUE_FLAG_TEXT}}</span>{{DAYS_OUT_META}}<span class="action-tag">{{ACTION_TAG}}</span></div>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
+            <div class="row-menu" role="menu" hidden>
+              <button type="button" class="menu-item" role="menuitem" data-action="mark-done" data-item-id="{{ITEM_ID}}">Mark done</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="ai" data-task="steps">Break into steps</button>
+              <a class="menu-item canvas-link" role="menuitem" href="{{CANVAS_URL}}" target="_blank" rel="noopener">Open in Canvas</a>
+              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the source</a>
+            </div>
+          </div>
+          <div class="row-expand" data-item-id="{{ITEM_ID}}" hidden></div>
+        </div>
+
+    END ASSIGNMENT ROW TEMPLATE
+
+    Per-row deletions (whole line): a.canvas-link without a validated
+    canvas_url (§6.4); a.source-link without SOURCE_URL (filled only as a
+    fallback when canvas_url is empty — orchestrator._fallback_source_url()
+    — so the two links never both render for one row); "Break into steps"
+    unless ai_actions has "steps"; span.action-tag when ACTION_TAG is empty
+    (lifecycle.action_tag() — a non-assignment/assessment row never earns
+    one). span.due-flag and DAYS_OUT_META are ONE slot (§10, gate check 28).
+    The row-new chip is emitted when times_surfaced == 0 (§5.6).
+
+    BEGIN GROUPED ROW TEMPLATE — 3+ recurring items collapsed into one (§5.8).
+    No menu, no data-context, no .row-expand:
+
+        <div class="row" data-item-id="group-{{COURSE}}-{{PATTERN_SLUG}}">
+          <div>
+            <div class="row-title"><span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
+            <div class="row-detail">{{GROUP_DATES}}</div>
+            <div class="row-meta">{{DAYS_OUT_META}}</div>
+          </div>
+        </div>
+
+    END GROUPED ROW TEMPLATE
+
+    BEGIN ASSESSMENT ROW TEMPLATE — once per item. No Mark done (§6.1):
+
+        <div class="row" data-item-id="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+          <div>
+            <div class="row-title"><span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
+            <div class="row-detail">{{DETAIL}}</div>
+            <div class="row-meta"><span class="row-new">New</span><span class="due-flag">{{DUE_FLAG_TEXT}}</span>{{DAYS_OUT_META}}<span class="action-tag">{{ACTION_TAG}}</span></div>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
+            <div class="row-menu" role="menu" hidden>
+              <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="ai" data-task="study">Make a study plan</button>
+              <a class="menu-item canvas-link" role="menuitem" href="{{CANVAS_URL}}" target="_blank" rel="noopener">Open in Canvas</a>
+              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the source</a>
+            </div>
+          </div>
+          <div class="row-expand" data-item-id="{{ITEM_ID}}" hidden></div>
+        </div>
+
+    END ASSESSMENT ROW TEMPLATE
+
+    BEGIN COMING-UP ROW TEMPLATE — once per item (also every campus row):
+
+        <div class="row" data-item-id="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+          <div>
+            <div class="row-title"><span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
+            <div class="row-detail">{{DETAIL}}</div>
+            <div class="row-meta"><span class="row-new">New</span><span class="due-flag">{{DUE_FLAG_TEXT}}</span>{{DAYS_OUT_META}}<span class="action-tag">{{ACTION_TAG}}</span></div>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
+            <div class="row-menu" role="menu" hidden>
+              <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
+              <a class="menu-item canvas-link" role="menuitem" href="{{CANVAS_URL}}" target="_blank" rel="noopener">Open in Canvas</a>
+              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the source</a>
+              <a class="menu-item add-reminder" role="menuitem" href="{{ADD_REMINDER_URL}}" target="_blank" rel="noopener">Add reminder</a>
+              <div class="menu-rate" role="group" aria-label="Was this worth showing?">
+                <span class="menu-rate-lbl">Worth showing?</span>
+                <button class="rate" type="button" data-action="rate" data-rating="up" aria-pressed="false" aria-label="Yes, more like this" title="Yes, more like this">&#128077;</button>
+                <button class="rate" type="button" data-action="rate" data-rating="down" aria-pressed="false" aria-label="No, fewer like this" title="No, fewer like this">&#128078;</button>
+              </div>
+            </div>
+          </div>
+          <div class="row-expand" data-item-id="{{ITEM_ID}}" hidden></div>
+        </div>
+
+    END COMING-UP ROW TEMPLATE
+
+    a.add-reminder only when source_refs has no gcal_* entry (§6.3). The
+    five-line div.menu-rate only on a SUGGESTED row — campus, opportunities,
+    or a row flagged rateable (§15). a.canvas-link/a.source-link follow the
+    same drop rules as the Assignment/Assessment templates above — most
+    coming-up rows have neither and both lines vanish, which is correct: an
+    ordinary event genuinely has nothing to open beyond Add reminder.
+
+    BEGIN ATTENTION ROW TEMPLATE — once per item:
+
+        <div class="row" data-item-id="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+          <div>
+            <div class="row-title"><span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
+            <div class="row-detail">{{DETAIL}}</div>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
+            <div class="row-menu" role="menu" hidden>
+              <button type="button" class="menu-item" role="menuitem" data-action="mark-resolved" data-item-id="{{ITEM_ID}}">Resolved</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="ai" data-task="email">Draft an email</button>
+              <a class="menu-item canvas-link" role="menuitem" href="{{CANVAS_URL}}" target="_blank" rel="noopener">Open in Canvas</a>
+              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the source</a>
+            </div>
+          </div>
+          <div class="row-expand" data-item-id="{{ITEM_ID}}" hidden></div>
+        </div>
+
+    END ATTENTION ROW TEMPLATE
+
+    BEGIN STANDING ROW TEMPLATE — Where you stand's compact per-course
+    summary line (§16b, 2026-09-18). NOT a second independent row: `item`
+    is ALSO a full row somewhere else on the page (Today, This week,
+    Further out, or Needs your attention), so the line carries `data-ref`
+    rather than a second `data-item-id` — a real duplicate `data-item-id`
+    on a `.row` would fail gate check 5, and a bare `.tbl-row` is invisible
+    to that check by construction. Its Mark done / Resolved buttons DO
+    carry the real item's `data-item-id`, because the generic click
+    handler (STORES.forEach, script block 1) reads the id off the BUTTON,
+    not off the row, and posts to the exact same /items/{id}/done or
+    /attention/{id}/resolved endpoint the canonical row's own button would
+    — this is the SAME resolution, not a parallel one. Gate check 16 is
+    widened to count these buttons as the legitimate echo they are,
+    cross-checked against the real item's kind via the `items` map
+    validate() already receives, not a second unverified assertion:
+
+        <div class="tbl-row" data-ref="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+          <span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span>
+          <p class="tbl-text">{{TEXT}}</p>
+          <span class="tbl-when">{{WHEN}}</span>
+          <div class="row-actions">
+            <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
+            <div class="row-menu" role="menu" hidden>
+              <button type="button" class="menu-item" role="menuitem" data-action="mark-done" data-item-id="{{ITEM_ID}}">Mark done</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="mark-resolved" data-item-id="{{ITEM_ID}}">Resolved</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
+              <a class="menu-item canvas-link" role="menuitem" href="{{CANVAS_URL}}" target="_blank" rel="noopener">Open in Canvas</a>
+              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the source</a>
+            </div>
+          </div>
+          <div class="row-expand" data-ref="{{ITEM_ID}}" hidden></div>
+        </div>
+
+    END STANDING ROW TEMPLATE
+
+    Per-row deletions: data-action="mark-done" unless the echoed item's
+    bucket is "assignments"; data-action="mark-resolved" unless it is the
+    course's overdue Needs-your-attention fallback (no upcoming item at
+    all) — render_briefing._standing_row() drops whichever does not apply,
+    so a line never offers both. canvas-link/source-link follow the same
+    drop rules as every other template above.
+
+    BEGIN LEAD ROW TEMPLATE — once per lead (§14):
+
+        <div class="row is-lead" data-item-id="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+          <div>
+            <div class="row-title"><span class="course-tag none">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
+            <div class="row-meta"><span class="row-new">New</span><span class="lead-conf">{{CONFIDENCE}}</span></div>
+            <ul class="lead-basis">{{BASIS_ITEMS}}</ul>
+            <div class="lead-act">{{ACT_BY_LINE}}</div>
+            <div class="lead-ask"><b>To confirm:</b> {{CONFIRM_ACTION}}</div>
+            <div class="lead-ask"><b>Drop it if:</b> {{KILL_CRITERIA}}</div>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
+            <div class="row-menu" role="menu" hidden>
+              <button type="button" class="menu-item" role="menuitem" data-action="lead-confirmed" data-item-id="{{ITEM_ID}}">Confirmed — it's real</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="lead-killed" data-item-id="{{ITEM_ID}}">Not real — drop it</button>
+              <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
+              <a class="menu-item lead-source" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the source</a>
+            </div>
+          </div>
+          <div class="row-expand" data-item-id="{{ITEM_ID}}" hidden></div>
+        </div>
+
+    END LEAD ROW TEMPLATE
+
+    BEGIN OPPORTUNITY ROW TEMPLATE — something to apply to, compete in or sign
+    up for (brief v2). DOSSIER_HTML is markup render_briefing.dossier_html()
+    builds from escaped values: quoted facts (checked against the source
+    page by service/research.py) and one line labelled as Claude's read:
+
+        <div class="row" data-item-id="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+          <div>
+            <div class="row-title"><span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
+            <div class="row-meta"><span class="row-new">New</span>{{OPP_META}}</div>
+            <div class="opp-dossier">{{DOSSIER_HTML}}</div>
+            <div class="opp-meta opp-ineligible">{{INELIGIBLE_NOTE}}</div>
+            <div class="lead-act">{{ACT_BY_LINE}}</div>
+          </div>
+          <div class="row-actions">
+            <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
+            <div class="row-menu" role="menu" hidden>
+              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the application page</a>
+              <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
+              <a class="menu-item add-reminder" role="menuitem" href="{{ADD_REMINDER_URL}}" target="_blank" rel="noopener">Add reminder</a>
+              <button type="button" class="menu-item" role="menuitem" data-action="dismiss" data-item-id="{{ITEM_ID}}">Not for me</button>
+              <div class="menu-rate" role="group" aria-label="Was this worth showing?">
+                <span class="menu-rate-lbl">Worth showing?</span>
+                <button class="rate" type="button" data-action="rate" data-rating="up" aria-pressed="false" aria-label="Yes, more like this" title="Yes, more like this">&#128077;</button>
+                <button class="rate" type="button" data-action="rate" data-rating="down" aria-pressed="false" aria-label="No, fewer like this" title="No, fewer like this">&#128078;</button>
+              </div>
+            </div>
+          </div>
+          <div class="row-expand" data-item-id="{{ITEM_ID}}" hidden></div>
+        </div>
+
+    END OPPORTUNITY ROW TEMPLATE
+  -->
+
+  <div class="section" id="section-today" data-empty="Nothing due today.">
+    <div class="sec-head"><h2 class="section-label">Today — Due</h2><span class="eyebrow d-only">{{TODAY_COUNT_LABEL}}</span></div>
+    <div class="cards">
+      <!-- INSERT TODAY CARDS HERE -->
+    </div>
+  </div><!-- /section-today -->
+
+  <!-- Optional: deleted as a unit when the calendar read found nothing. -->
+  <div class="section" id="section-schedule">
+    <div class="sec-head"><h2 class="section-label">Today — on your calendar</h2><span class="eyebrow d-only">{{SCHEDULE_COUNT_LABEL}}</span></div>
+    <div class="panel">
+      <!-- INSERT SCHEDULE HERE -->
+    </div>
+  </div><!-- /section-schedule -->
+
+
+
+  <div class="section" id="section-attention" data-empty="Nothing needs your attention.">
+    <div class="sec-head"><h2 class="section-label">Needs your attention<span class="m-only"> &middot; {{ATTENTION_COUNT}}</span></h2><span class="eyebrow d-only"><span data-live="attention">{{ATTENTION_COUNT}}</span> unresolved</span></div>
+    <div class="attn">
+      <!-- INSERT ATTENTION ROWS HERE -->
+    </div>
+    <!-- §5.1c: System rows, and rows past attention_max, behind a native
+         disclosure. render() deletes the whole details when there are none;
+         gate check 29 keeps System rows out of the inline list. -->
+    <details class="more attn-more">
+      <summary><span class="more-open">{{ATTENTION_MORE_LABEL}}</span><span class="more-shut">Show fewer</span></summary>
+      <div class="attn">
+        <!-- INSERT SECONDARY ATTENTION ROWS HERE -->
+      </div>
+    </details>
+  </div><!-- /section-attention -->
+
+  <!-- Brief v2: What changed since yesterday's brief (service/digest.py) --
+       Canvas announcements, posted files, graded work, moved dates, updated
+       pages -- one block per course. Deleted as a unit when empty. -->
+  <div class="section" id="section-changes">
+    <div class="sec-head"><h2 class="section-label">What changed</h2><span class="eyebrow d-only">{{CHANGES_RANGE}}</span></div>
+    <div class="chg-panel">
+      <!-- INSERT CHANGES HERE -->
+    </div>
+  </div><!-- /section-changes -->
+
+  <div class="section" id="section-week">
+    <div class="sec-head"><h2 class="section-label">This week</h2><span class="eyebrow">{{WEEK_RANGE}}</span></div>
+    <div class="week">
+      <!-- INSERT WEEK HERE -->
+    </div>
+  </div><!-- /section-week -->
+
+  <div class="section" id="section-opportunities">
+    <div class="sec-head"><h2 class="section-label">Opportunities</h2><span class="eyebrow d-only">{{OPPS_STAMP}}</span></div>
+    <div class="stack">
+      <!-- INSERT OPPORTUNITY ROWS HERE -->
+    </div>
+  </div><!-- /section-opportunities -->
+
+  <div class="section" id="section-campus" data-empty="No campus events matched your preferences this week.">
+    <div class="sec-head"><h2 class="section-label">{{CAMPUS_HEADING}}</h2><span class="eyebrow d-only">optional, low-stakes</span></div>
+    <div class="panel times">
+      <!-- INSERT CAMPUS HERE -->
+    </div>
+  </div><!-- /section-campus -->
+
+  <div class="section" id="section-standing">
+    <div class="sec-head"><h2 class="section-label">Where you stand</h2><span class="eyebrow">next thing per course</span></div>
+    <div class="tbl">
+      <!-- INSERT STANDING HERE -->
+    </div>
+  </div><!-- /section-standing -->
+
+  <div class="section" id="section-further">
+    <div class="sec-head"><h2 class="section-label">Further out</h2><span class="eyebrow d-only">{{FURTHER_RANGE}}</span></div>
+    <div class="tbl">
+      <!-- INSERT FURTHER OUT HERE -->
+    </div>
+    <!-- A pure-FYI event/advising row (lifecycle.is_fyi(), §16c) — nothing
+         in its title or detail says it requires action by a date — is
+         demoted here rather than dropped, same "demoted, not dropped"
+         treatment as Needs your attention's own attn-more overflow above.
+         render() deletes the whole details when there is nothing to hide. -->
+    <details class="more further-more">
+      <summary><span class="more-open">{{FURTHER_MORE_LABEL}}</span><span class="more-shut">Show fewer</span></summary>
+      <div class="tbl">
+        <!-- INSERT SECONDARY FURTHER ROWS HERE -->
+      </div>
+    </details>
+  </div><!-- /section-further -->
+
+  <div class="section" id="section-leads">
+    <div class="sec-head"><h2 class="section-label">Leads — unconfirmed, worth one look</h2><span class="eyebrow d-only">{{WEEK_STAMP}}</span></div>
+    <div class="stack">
+      <!-- INSERT LEAD ROWS HERE -->
+    </div>
+  </div><!-- /section-leads -->
+
+
+  <div class="section" id="section-coverage">
+    <div class="sec-head"><h2 class="section-label">What I can't see</h2></div>
+    <div class="tbl">
+      <!-- INSERT COVERAGE NOTES HERE -->
+    </div>
+  </div><!-- /section-coverage -->
+
+  <!-- Page-level AI action (§6.5), wired in script block 2 to
+       POST /ai/week (service/app.py). -->
+  <div class="page-actions">
+    <button type="button" class="act" data-action="ai-page" data-task="week">Plan my week</button>
+    <div class="page-expand" hidden></div>
+  </div>
+
+  <div class="footer">
+    <span class="d-only">Generated from your Gmail, Calendar and course pages &middot; last run {{RUN_SHORT}}</span>
+    <span class="m-only">Last run {{RUN_SHORT}}</span>
+    <span class="status">{{TIME_LABEL}} &middot; {{STATUS_LABEL}}</span>
+    <button type="button" class="linkbtn" data-action="prefs-open" aria-haspopup="dialog">Brief preferences</button>
+  </div>
+
+</div>
+</div>
+
+<!-- Two dialogs, outside the page: #sheet-detail (Show full detail and every
+     AI action) and #sheet-prefs (the §12 form, opened from the footer). -->
+<dialog class="sheet" id="sheet-detail" aria-labelledby="sheet-detail-title">
+  <div class="sheet-head">
+    <div class="sheet-title" id="sheet-detail-title">Detail</div>
+    <button class="sheet-close" type="button" data-action="sheet-close" aria-label="Close">&#215;</button>
+  </div>
+  <div class="sheet-body" data-role="detail-body"></div>
+  <div class="sheet-foot" data-role="detail-foot" hidden></div>
+</dialog>
+
+<dialog class="sheet" id="sheet-prefs" aria-labelledby="sheet-prefs-title">
+  <div class="sheet-head">
+    <div class="sheet-title" id="sheet-prefs-title">Brief preferences
+      <div class="sheet-sub">What you want out of these briefings. Saved here and read by tomorrow morning's run.</div>
+    </div>
+    <button class="sheet-close" type="button" data-action="sheet-close" aria-label="Close">&#215;</button>
+  </div>
+  <div class="sheet-body">
+    <div class="prefs-body" data-role="prefs-body"></div>
+  </div>
+  <div class="sheet-foot">
+    <button type="button" class="act" data-action="prefs-save">Save preferences</button>
+    <span class="prefs-status" data-role="prefs-status" role="status" aria-live="polite"></span>
+  </div>
+</dialog>
+
+<script>
+  // ============================================================
+  // BOOTSTRAP SCRIPT — LOCKED. The renderer never edits or retypes this block;
+  // it splices around it (prompt step 8) so it stays byte-identical.
+  //
+  // It carries two things: the URL SAFETY GATE (first, because it must run
+  // before any href on the page can be activated) and Done/Resolved/lead
+  // persistence plus ratings.
+  //
+  // "Add reminder" deliberately has NO code here: it is a plain a element with
+  // a real href. Two
+  // reasons, both in Instructions §6.3 — it can't be a connector call from an
+  // unattended run, and window.open is blocked in the viewer's sandbox (it
+  // returns null and the click does nothing). Do not add a handler for it.
+  //
+  // NOT the claude.ai Artifact `db` capability. This page is served by
+  // `service/app.py` over plain FastAPI/Tailscale (PROGRESS.md's migration
+  // off the interactive claude.ai workflow) — there is no artifact host here
+  // to grant `db`/`sample`, so `window.claude` is simply undefined. Every
+  // write below is a same-origin `fetch()` straight to app.py's own
+  // per-item action routes (`POST /items/{id}/done`, `/attention/{id}/
+  // resolved`, `/leads/{id}/confirmed`, `/leads/{id}/killed`,
+  // `/feedback/{id}`) — see the STORES table just below. Fixed 2026-09-16;
+  // before that, every one of these buttons silently did nothing.
+  // ============================================================
+  (function () {
+    // ---- URL SAFETY GATE -------------------------------------------------
+    // Every href the pipeline fills in — CANVAS_URL, ADD_REMINDER_URL,
+    // SOURCE_URL — is validated upstream (§6.4). This is the client-side
+    // backstop for when it is not, and it REJECTS rather than escapes: an
+    // escaped `javascript:` href is still a working `javascript:` href, so
+    // the only safe handling of a bad scheme is for the link not to exist.
+    //
+    // Two failures are caught:
+    //  - a scheme that is not http/https. The test reads `a.protocol`, the
+    //    browser's own parse of the attribute, so leading whitespace, control
+    //    characters, entity-encoding and mixed case are already resolved —
+    //    the cases a string test against the raw attribute misses.
+    //  - an href that still contains "{{", i.e. a placeholder that survived
+    //    the render (render rule 2). That one has to be checked separately,
+    //    because as a RELATIVE url it passes the scheme test cleanly and then
+    //    navigates somewhere real and wrong.
+    //
+    // Removing the anchor, not disabling it: a disabled-looking link still
+    // has a copyable target in the DOM, and this file's existing precedent is
+    // to remove a control that cannot work (the AI items when sampling is
+    // unavailable) rather than leave it dead. linkify() in the AI block
+    // already admits http(s) only, so both paths now enforce one rule.
+    //
+    // rel is normalised on the way past. The row templates carry
+    // rel="noopener" and linkify() sets "noopener noreferrer", so the same
+    // kind of link leaked this artifact's url as a Referer from one path and
+    // not the other. That url IS the identity of the whole store and is
+    // reused every day (§7), so noreferrer is the setting that matches it.
+    (function () {
+      var anchors = document.querySelectorAll("a[href]");
+      Array.prototype.forEach.call(anchors, function (a) {
+        var raw = a.getAttribute("href") || "";
+        var scheme = String(a.protocol || "").toLowerCase();
+        if (!raw.trim() || raw.indexOf("{{") !== -1 ||
+            (scheme !== "http:" && scheme !== "https:")) {
+          if (a.parentNode) a.parentNode.removeChild(a);
+          return;
+        }
+        if (a.target === "_blank") a.setAttribute("rel", "noopener noreferrer");
+      });
+    })();
+
+    // `endpoint` stores hit the FastAPI service's real per-item action routes
+    // directly -- `service/app.py` never exposes a map-document read/modify/
+    // write for any of these four, only a single POST per item, so there is
+    // nothing to fetch-modify-set here at all. All four actions are wired
+    // this way as of 2026-09-16: the Leads pair (`lead-confirmed`/
+    // `lead-killed`) used to fall back to the old `db.doc(path)` map-document
+    // shape below because no matching app.py route existed yet -- like every
+    // `db.doc(...)` call in this file before the mark-done/mark-resolved fix,
+    // that only ever worked under the claude.ai Artifact host's `db`
+    // capability, which this service's plain FastAPI hosting does not
+    // supply, so those two buttons silently did nothing. `POST /leads/{id}/
+    // confirmed` and `POST /leads/{id}/killed` now exist in app.py (§14.3),
+    // so they're on the same `endpoint`/`wants` shape as the other two and
+    // the shim helper and its promise below are gone -- nothing in this
+    // block reads a `path` store any more.
+    var STORES = [
+      { action: "mark-done",
+        endpoint: function (id) { return "/items/" + encodeURIComponent(id) + "/done"; },
+        wants: "handled", section: "section-today", empty: "Nothing due today." },
+      { action: "mark-resolved",
+        endpoint: function (id) { return "/attention/" + encodeURIComponent(id) + "/resolved"; },
+        wants: "dismissed", section: "section-attention", empty: "Nothing needs your attention." },
+      // §14.3. Two stores, not one flag: `killed` means the hypothesis was
+      // TESTED and was wrong, so it must never be re-raised; `confirmed` means
+      // it was real and has graduated out of the lead regime. Collapsing them
+      // would lose the distinction the run needs to not repeat itself.
+      { action: "lead-confirmed",
+        endpoint: function (id) { return "/leads/" + encodeURIComponent(id) + "/confirmed"; },
+        wants: "confirmed", section: "section-leads", empty: "No leads this week." },
+      { action: "lead-killed",
+        endpoint: function (id) { return "/leads/" + encodeURIComponent(id) + "/killed"; },
+        wants: "killed", section: "section-leads", empty: "No leads this week." },
+      // Brief v2: "Not for me" on an opportunity.
+      { action: "dismiss",
+        endpoint: function (id) { return "/items/" + encodeURIComponent(id) + "/dismiss"; },
+        wants: "dismissed", section: "section-opportunities", empty: "Nothing open right now." }
+    ];
+
+    // Brief v2: masthead pills and the attention count follow the page.
+    // After a Done/Resolved click (or the same-day status reload) each
+    // counted pill is re-counted from the rows still showing, and hidden
+    // at zero -- it used to keep saying "1 needs a look" over an empty list.
+    var COUNTS = {
+      today: "#section-today .row:not(.is-done)",
+      attention: "#section-attention > .attn .row:not(.is-done)"
+    };
+    function refreshCounts() {
+      Object.keys(COUNTS).forEach(function (key) {
+        var n = document.querySelectorAll(COUNTS[key]).length;
+        document.querySelectorAll('[data-count="' + key + '"]').forEach(function (pill) {
+          var fmt = n === 1 ? pill.getAttribute("data-one") : pill.getAttribute("data-many");
+          pill.textContent = String(fmt || "{n}").replace("{n}", n);
+          pill.hidden = n === 0;
+        });
+        document.querySelectorAll('[data-live="' + key + '"]').forEach(function (el) {
+          el.textContent = String(n);
+        });
+        if (key === "attention") {
+          var m = document.querySelector("#section-attention .section-label .m-only");
+          if (m) m.textContent = " \u00b7 " + n;
+        }
+      });
+    }
+ 
+    function esc(value) {
+      var v = String(value == null ? "" : value);
+      return (window.CSS && CSS.escape) ? CSS.escape(v) : v.replace(/["\\]/g, "\\$&");
+    }
+ 
+    function hideRow(sectionId, itemId) {
+      // Page-wide since the 2026-09-17 redesign: an item no longer lives in
+      // one type-named section. A row renders wherever its DATE puts it
+      // (today's cards, a day of the week, further out), so the store's
+      // section name only chooses the empty-note wording. querySelectorAll,
+      // not querySelector: every row carrying the id is done by definition.
+      // The Where-you-stand line that points at the same item (data-ref)
+      // goes with it.
+      var sel = '.row[data-item-id="' + esc(itemId) + '"], [data-ref="' + esc(itemId) + '"]';
+      Array.prototype.forEach.call(document.querySelectorAll(sel), function (row) {
+        row.classList.add("is-done");
+      });
+    }
+ 
+    function maybeShowEmptyNote(sectionId, message) {
+      // A week-day group or a time slot whose rows are all done disappears
+      // with them, rather than leaving a course pill over nothing.
+      document.querySelectorAll(".wk-group, .t-row").forEach(function (g) {
+        if (g.querySelector(".row") && !g.querySelector(".row:not(.is-done)")) {
+          g.classList.add("is-done");
+        }
+      });
+      document.querySelectorAll(".wk-day").forEach(function (d) {
+        if (d.querySelector(".wk-group") && !d.querySelector(".wk-group:not(.is-done)")) {
+          d.classList.add("is-cleared");
+        }
+      });
+      // The "N more / Show fewer" overflow disclosure (attn-more,
+      // further-more) is baked into the page at render time with its own
+      // row count and summary label. Resolving every row it holds only adds
+      // `is-done` to those rows -- the <details> wrapper itself, and its
+      // stale "N MORE"/"SHOW FEWER" summary, stayed on screen with nothing
+      // left to show. Hide the whole disclosure once none of its rows
+      // remain visible.
+      document.querySelectorAll("details.more").forEach(function (d) {
+        var rows = d.querySelectorAll(".row");
+        if (rows.length > 0 &&
+            d.querySelectorAll(".row:not(.is-done)").length === 0) {
+          d.classList.add("is-done");
+        }
+      });
+      // A section whose every row is done gets the same one-line note it
+      // would have shipped with (its own data-empty text).
+      document.querySelectorAll(".section[data-empty]").forEach(function (section) {
+        if (!section.querySelector(".row")) return;
+        if (section.querySelectorAll(".row:not(.is-done)").length > 0) return;
+        if (section.querySelector(".empty-note")) return;
+        var note = document.createElement("div");
+        note.className = "empty-note";
+        note.textContent = section.getAttribute("data-empty") || message;
+        section.appendChild(note);
+        section.classList.add("is-empty");
+      });
+    }
+ 
+    // One queue for every rating write, declared HERE at the block's own
+    // scope. The rating code below used to assign to `writeQueue`, which is
+    // declared inside STORES.forEach and therefore not in scope for it: every
+    // thumb click threw ReferenceError on the first read of that name. The
+    // throw happened AFTER paintPair, so the thumb lit up and nothing was ever
+    // written — §15's whole feedback loop was dead and looked like it worked.
+    // Its own queue rather than reusing a store's: the stores serialise writes
+    // to ONE map document each, while ratings are per-item docs (see below).
+    var rateQueue = Promise.resolve();
+ 
+    // Every store above is now `endpoint`-based (as of 2026-09-16, once the
+    // Leads pair got its own app.py routes) -- there is no more `path` store
+    // reading or writing a map document here, so the REST-shim helper this
+    // block used to need is gone. (The prefs script block further down still
+    // has its own, separate copy of that helper for `/prefs/*` -- that one
+    // reads/writes a single whole document per call, a genuinely different
+    // shape from these one-item-at-a-time action routes, and is unaffected
+    // by this.)
+    //
+    // One fetch, shared by every store: a single-item POST has no map
+    // document to "get" the way the old `db.doc(path)` stores did, so
+    // reflecting what is already done/resolved/confirmed/killed on load
+    // reads from GET /items/status instead.
+    var statusPromise = fetch("/items/status").then(function (res) {
+      return res.ok ? res.json() : {};
+    }).catch(function () { return {}; });
+
+    STORES.forEach(function (store) {
+      var writeQueue = Promise.resolve();
+
+      document.querySelectorAll('[data-action="' + store.action + '"]').forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var itemId = btn.dataset.itemId;
+          if (!itemId) return;
+          btn.disabled = true;
+          hideRow(store.section, itemId);
+          maybeShowEmptyNote(store.section, store.empty);
+          refreshCounts();
+
+          writeQueue = writeQueue.then(function () {
+            return fetch(store.endpoint(itemId), { method: "POST" });
+          }).catch(function () {
+            // Best effort: a failed write leaves the row hidden for this
+            // session only. Convenience layer, not a system of record.
+          });
+        });
+      });
+
+      statusPromise.then(function (statuses) {
+        Object.keys(statuses || {}).forEach(function (id) {
+          if (statuses[id] === store.wants) hideRow(store.section, id);
+        });
+        maybeShowEmptyNote(store.section, store.empty);
+        refreshCounts();
+      });
+    });
+
+    // Brief v2: "since you last looked". POST /visit returns the previous
+    // visit (the server keeps one baseline per 30-minute session, so a
+    // reload does not wipe the markers). Anything first seen after that
+    // visit gets a dot, and the masthead says how many.
+    (function () {
+      var since = document.querySelector('[data-role="since"]');
+      fetch("/visit", { method: "POST" }).then(function (res) {
+        return res.ok ? res.json() : {};
+      }).then(function (body) {
+        var prev = body && body.previous ? Date.parse(body.previous) : NaN;
+        if (isNaN(prev)) return;
+        var fresh = 0;
+        document.querySelectorAll("[data-seen]").forEach(function (el) {
+          var seen = Date.parse(el.getAttribute("data-seen") + "T06:00:00");
+          if (!isNaN(seen) && seen > prev && !el.classList.contains("is-done")) {
+            el.classList.add("is-fresh");
+            fresh += 1;
+          }
+        });
+        if (!fresh || !since) return;
+        var when = new Date(prev);
+        var label = when.toLocaleString([], { weekday: "short", hour: "numeric", minute: "2-digit" });
+        since.textContent = fresh + " new since you last looked (" + label + ")";
+        since.hidden = false;
+      }).catch(function () { });
+    })();
+ 
+    // ---- RATING (§15) ---------------------------------------------------
+    // Wired here rather than in the AI block for one reason: this block is the
+    // one that already owns `db` writes, the write queue and the
+    // read-modify-set discipline. A second writer with its own queue could
+    // clobber a concurrent write, and the queue only serialises what shares it.
+    //
+    // One document PER ITEM at feedback/<item-id>, not one map document like
+    // the stores above. A rating is written on a whim and read a day later by
+    // a different process; per-item docs mean two fast clicks on two rows
+    // cannot lose one another even before the queue is involved.
+    //
+    // Serialised through `rateQueue`, declared at the top of this block. Do
+    // not reach for a store's `writeQueue`: those are per-store and scoped to
+    // the forEach callback that creates them.
+    //
+    // `family` and `organizer` are stamped AT CLICK TIME from the row's own
+    // dataset, because a rating has to generalise to the NEXT instance of a
+    // recurring event and the item id is per-instance (§3.3). Recomputing them
+    // later from an item that may no longer exist would not be possible.
+    (function () {
+      var rateButtons = document.querySelectorAll('[data-action="rate"]');
+      if (!rateButtons.length) return;
+ 
+      function idOf(btn) {
+        var row = btn.closest(".row");
+        return row ? (row.dataset.itemId || "") : "";
+      }
+
+      function paintPair(btn, rating) {
+        var group = btn.closest(".menu-rate");
+        if (!group) return;
+        group.querySelectorAll('[data-action="rate"]').forEach(function (b) {
+          b.setAttribute("aria-pressed",
+                         b.dataset.rating === rating ? "true" : "false");
+        });
+      }
+
+      // Replaced 2026-09-16: POST /feedback/<id> already toggles server-side
+      // (posting the SAME rating twice clears it, app.py's own §15 rule), and
+      // it derives family/organizer itself from the stored item row rather
+      // than trusting the client — so the client no longer computes a
+      // set-vs-clear decision or stamps family/organizer into the write body
+      // at all, it only predicts the paint optimistically and then corrects
+      // it from the server's own answer once the write confirms.
+      rateButtons.forEach(function (btn) {
+        btn.addEventListener("click", function (e) {
+          e.stopPropagation();
+          var id = idOf(btn);
+          if (!id) return;
+          // Clicking the pressed thumb clears the rating. "I take that back"
+          // has to be expressible, or a mis-tap is permanent and the ranker
+          // learns something the reader never meant. This is a PREDICTION of
+          // what the server will do, painted immediately for responsiveness;
+          // the real decision is server-side (see above).
+          var already = btn.getAttribute("aria-pressed") === "true";
+          paintPair(btn, already ? null : btn.dataset.rating);
+
+          rateQueue = rateQueue.then(function () {
+            return fetch("/feedback/" + encodeURIComponent(id), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ rating: btn.dataset.rating })
+            }).then(function (res) {
+              if (!res.ok) throw new Error("rating failed: " + res.status);
+              return res.json();
+            }).then(function (body) {
+              paintPair(btn, body.rating);
+            });
+          }).catch(function () {
+            // Best effort, same as Done/Resolved: the thumb stays lit for this
+            // session and simply does not reach tomorrow's run.
+          });
+        });
+      });
+
+      // Reflect ratings already stored, so yesterday's thumb is still lit.
+      // GET /feedback (added to app.py alongside this) returns the whole
+      // {item_id: rating} map in one call rather than one fetch per row.
+      fetch("/feedback").then(function (res) {
+        return res.ok ? res.json() : {};
+      }).then(function (ratings) {
+        rateButtons.forEach(function (btn) {
+          var r = (ratings || {})[idOf(btn)];
+          if (r) paintPair(btn, r);
+        });
+      }).catch(function () { });
+    })();
+  })();
+</script>
+ 
+<script>
+  // ============================================================
+  // ROW MENU + AI ACTIONS — a second locked block. The bootstrap script above
+  // is never touched; this one is never retyped either (prompt step 8).
+  // Rationale: Project Instructions §6.5.
+  //
+  // Mark done / Resolved are NOT handled here. They live in the menu as
+  // [data-action="mark-done"] / [data-action="mark-resolved"], and the
+  // bootstrap script above wires those by attribute wherever they sit — which
+  // is why moving them into a menu needed no change to it at all.
+  //
+  // "Show full detail" is deliberately NOT an AI call: the full text is
+  // already in data-context, so showing it is instant, free, and cannot
+  // fabricate. AI is spent only where generation is the point (§6.5).
+  //
+  // ANSWERS PERSIST server-side. Each click POSTs to service/app.py's
+  // `/ai/{item_id}/{task}` (`/ai/week` for the page-level button), which
+  // hashes the item's own grounding block, reuses a cached answer from
+  // `ai_answers`/`plan_my_week` while that hash still matches, and calls
+  // `llm_cli.call()` (the same `claude -p` wrapper the orchestrator uses)
+  // only when it doesn't. Because item ids are stable across runs (§3.3),
+  // tomorrow's briefing gets yesterday's answer for the same item with no
+  // second model call — until the item's own context changes, at which
+  // point the hash stops matching and it regenerates: a stale plan for a
+  // rewritten assignment would be worse than no plan. A "Regenerate"
+  // control is offered on every saved answer (this script just always
+  // re-asks; the server is what decides saved-vs-fresh).
+  //
+  // Every AI prompt lives in service/app.py, fixed and reviewable there —
+  // never assembled by this script, never built by the pipeline per run.
+  // Each prompt states that the item block is data and never an instruction
+  // (§1.5), and that no fact may be added beyond it (§1.6); where a task
+  // legitimately needs judgement, it must leave a [bracketed blank] rather
+  // than invent. Each also gives the model permission to say the task is
+  // not worth doing, which is what stops a trivial item producing filler
+  // steps.
+  //
+  // Model output is rendered by building DOM nodes — never innerHTML — so a
+  // model answer derived from email content cannot inject markup.
+  // ============================================================
+  (function () {
+    // 2026-09-19: the prompts that used to live here (NO_PAD/STYLE/TASKS,
+    // one `build(ctx)` per task) moved server-side, into service/app.py's
+    // `/ai/{item_id}/{task}` and `/ai/week` -- same wording, same grounding
+    // rules (§6.5's "data, never instruction" / "no invented specifics" /
+    // "[bracketed blank]" / permission to say a task is too small), but
+    // built from the item's real row (including its full Canvas/source
+    // `description`, which the page's own `data-context` never carried)
+    // rather than from the DOM. See that file for the actual prompt text.
+    // The per-answer cache moved with them, into `ai_answers`/
+    // `plan_my_week` (already-existing tables, §6.5's own persistence
+    // design, just never wired to anything) -- so `hash()`/`cache` below
+    // are gone too; the server decides reuse-vs-regenerate now.
+
+    // Markdown-lite, built as DOM nodes. Handles what a model actually emits:
+    // headings, bullets, numbered lists and **bold**. Everything else stays
+    // literal text. No innerHTML anywhere, by design.
+    function fmt(text) {
+      var wrap = document.createElement("div");
+      wrap.className = "fmt";
+      var list = null;
+      function inline(parent, s) {
+        s.split(/\*\*/).forEach(function (chunk, i) {
+          if (!chunk) return;
+          if (i % 2) {
+            var b = document.createElement("strong");
+            b.textContent = chunk;
+            parent.appendChild(b);
+          } else {
+            parent.appendChild(document.createTextNode(chunk));
+          }
+        });
+      }
+      // text == null covers a provider that streams {text: undefined} and a
+      // saved answer whose text field is missing. String(undefined) would
+      // paint the literal word "undefined" into the panel, which render rule
+      // 2 forbids anywhere on the page.
+      String(text == null ? "" : text).replace(/\r/g, "").split("\n").forEach(function (raw) {
+        var line = raw.replace(/\s+$/, "");
+        if (!line.trim()) { list = null; return; }
+        var h = line.match(/^\s*#{1,4}\s+(.*)$/);
+        var li = line.match(/^\s*(?:[-*\u2022]|\d+[.)])\s+(.*)$/);
+        if (h) {
+          list = null;
+          var head = document.createElement("div");
+          head.className = "fmt-h";
+          inline(head, h[1]);
+          wrap.appendChild(head);
+        } else if (li) {
+          if (!list) {
+            list = document.createElement("ul");
+            list.className = "fmt-ul";
+            wrap.appendChild(list);
+          }
+          var item = document.createElement("li");
+          inline(item, li[1]);
+          list.appendChild(item);
+        } else {
+          list = null;
+          var p = document.createElement("p");
+          p.className = "fmt-p";
+          inline(p, line);
+          wrap.appendChild(p);
+        }
+      });
+      return wrap;
+    }
+ 
+    function closeAllMenus(except, refocus) {
+      document.querySelectorAll(".row-menu").forEach(function (m) {
+        if (m === except) return;
+        var btn = m.parentNode.querySelector('[data-action="row-menu"]');
+        // Returning focus matters: without it, closing a menu with Escape
+        // drops focus to the document and a keyboard user restarts from the
+        // top of the page. Only on an explicit dismissal — refocusing on
+        // every outside click would steal focus from whatever was clicked.
+        if (refocus && !m.hidden && btn && m.contains(document.activeElement)) {
+          btn.focus();
+        }
+        m.hidden = true;
+        if (btn) btn.setAttribute("aria-expanded", "false");
+      });
+    }
+
+    // role="menu" is a promise about keyboard behaviour: arrow keys move
+    // between items, Home/End jump, Escape dismisses, Tab leaves. The markup
+    // declared the role and the script implemented none of it, so the menu
+    // announced itself as a menu and then did not behave like one. aria-controls
+    // is wired here rather than in the markup so no row template needs a new
+    // placeholder and the validation gate is unaffected.
+    var menuSeq = 0;
+
+    // ".menu-item, .rate" — the rating thumbs are focus stops in this menu
+    // as well. They were in NEITHER keyboard path: the arrow keys walked only
+    // .menu-item, and Tab closes the menu, so the two buttons §15's whole
+    // feedback loop depends on could not be reached by keyboard at all. They
+    // keep their aria-pressed toggle semantics (they are a clearable pair,
+    // not a radio group); this only makes them reachable.
+    function menuItems(menu) {
+      return Array.prototype.filter.call(
+        menu.querySelectorAll(".menu-item, .rate"),
+        function (el) { return !el.disabled && el.offsetParent !== null; });
+    }
+
+    function focusItem(menu, index) {
+      var items = menuItems(menu);
+      if (!items.length) return;
+      var i = (index + items.length) % items.length;
+      items[i].focus();
+    }
+
+    function wireMenuKeys(btn, menu) {
+      if (!menu.id) {
+        menuSeq += 1;
+        menu.id = "row-menu-" + menuSeq;
+      }
+      btn.setAttribute("aria-controls", menu.id);
+
+      btn.addEventListener("keydown", function (e) {
+        if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+        e.preventDefault();
+        closeAllMenus(menu, false);
+        menu.hidden = false;
+        btn.setAttribute("aria-expanded", "true");
+        focusItem(menu, e.key === "ArrowDown" ? 0 : -1);
+      });
+
+      menu.addEventListener("keydown", function (e) {
+        var items = menuItems(menu);
+        var at = items.indexOf(document.activeElement);
+        if (e.key === "ArrowDown") { e.preventDefault(); focusItem(menu, at + 1); }
+        else if (e.key === "ArrowUp") { e.preventDefault(); focusItem(menu, at - 1); }
+        else if (e.key === "Home") { e.preventDefault(); focusItem(menu, 0); }
+        else if (e.key === "End") { e.preventDefault(); focusItem(menu, -1); }
+        // Focus the button FIRST, then let Tab do its default thing. Tabbing
+        // out of an element this handler has just hidden leaves the browser
+        // working out "the next focusable after a display:none node", which
+        // skipped the rest of the row; from the button, Tab and Shift+Tab
+        // both land where the reader expects.
+        else if (e.key === "Tab") { closeAllMenus(null, false); btn.focus(); }
+      });
+    }
+ 
+    // ---- the shared panel ------------------------------------------------
+    // Every expansion — Show full detail and all four AI actions — now paints
+    // into one dialog instead of into a .row-expand under the row. The
+    // .row-expand divs stay in the markup: check 11 and the archive copy both
+    // expect the row's third grid child, and a no-dialog browser falls back to
+    // them below.
+    var sheet = document.getElementById("sheet-detail");
+    var sheetTitle = document.getElementById("sheet-detail-title");
+    var sheetBody = sheet && sheet.querySelector('[data-role="detail-body"]');
+    var sheetFoot = sheet && sheet.querySelector('[data-role="detail-foot"]');
+    // Every node openSheet() writes into is required, not just the dialog:
+    // it sets .textContent on all three, so a dialog that had lost one of its
+    // data-role children would throw on the first Show full detail and take
+    // the click handler down with it — instead of falling back to the in-row
+    // expansion that exists for exactly this case.
+    var canDialog = !!(sheet && sheetTitle && sheetBody && sheetFoot &&
+                       typeof sheet.showModal === "function");
+
+    // WHERE FOCUS GOES WHEN THE DIALOG CLOSES. showModal() restores focus to
+    // whatever was focused when it opened — which here is the MENU ITEM that
+    // was clicked, and closeAllMenus() has hidden the menu containing it by
+    // then. The browser has nowhere to put focus and drops it on the
+    // document, so a keyboard user lands back at the top of the page. The
+    // stylesheet's own note about never ringing the whole pane is the visible
+    // symptom of this ("a dialog closes and the button that opened it is no
+    // longer where focus can return to"); this is the cause. The row's own ⋯
+    // button is the right target: it is still visible, it is what opened the
+    // menu, and it is where the reader was.
+    var focusOnClose = null;
+
+    function openSheet(title, invoker) {
+      if (!canDialog) return false;
+      sheetTitle.textContent = title;
+      sheetBody.textContent = "";
+      // Cleared on every open. An AI error path used to set `hidden` on this
+      // very node and nothing ever cleared it again, so one failed request
+      // left the shared panel blank for every later Show full detail in the
+      // session — an empty dialog with a title and no content.
+      sheetBody.hidden = false;
+      sheetFoot.textContent = "";
+      sheetFoot.hidden = true;
+      if (invoker) {
+        var inMenu = invoker.closest ? invoker.closest(".row-menu") : null;
+        var actions = invoker.closest ? invoker.closest(".row-actions") : null;
+        focusOnClose = (inMenu && actions &&
+                        actions.querySelector('[data-action="row-menu"]')) || invoker;
+      }
+      if (!sheet.open) sheet.showModal();
+      return true;
+    }
+
+    if (sheet) {
+      sheet.addEventListener("close", function () {
+        var target = focusOnClose;
+        focusOnClose = null;
+        // offsetParent is the same liveness test menuItems() uses: only hand
+        // focus to something still in the document and still displayed.
+        if (target && document.contains(target) && target.offsetParent !== null) {
+          target.focus();
+        }
+      });
+    }
+
+    document.querySelectorAll('[data-action="sheet-close"]').forEach(function (b) {
+      b.addEventListener("click", function () {
+        var d = b.closest("dialog");
+        if (d && d.open) d.close();
+      });
+    });
+    // Click on the backdrop closes. The dialog element itself is the click
+    // target for its own backdrop, so compare against the content box.
+    document.querySelectorAll("dialog.sheet").forEach(function (d) {
+      d.addEventListener("click", function (e) { if (e.target === d) d.close(); });
+    });
+
+    // Where you stand's .tbl-row (§16b, 2026-09-18) carries the same
+    // Show-full-detail / row-menu affordance as a real .row, so every
+    // helper below that walks up from a clicked control to "the row it's
+    // in" has to recognise both container classes, not just .row.
+    function expandFor(el) {
+      var row = el.closest(".row, .tbl-row");
+      if (row) return row.querySelector(".row-expand");
+      var wrap = el.closest(".page-actions");
+      return wrap ? wrap.querySelector(".page-expand") : null;
+    }
+
+    function rowTitleFor(el) {
+      var row = el.closest(".row, .tbl-row");
+      if (!row) return "Your week";
+      // .tbl-row (Where you stand) has no .row-title wrapper — just a bare
+      // .course-tag sibling and a .tbl-text — so its title comes from
+      // .tbl-text instead, with no label to peel off (the course tag was
+      // never glued onto that text the way .row-title glues it in a real
+      // row, so there's nothing to strip).
+      var t = row.querySelector(".row-title") || row.querySelector(".tbl-text");
+      if (!t) return "Detail";
+      var name = t.textContent.trim();
+      if (!row.classList.contains("row")) return name || "Detail";
+      // .row-title glues its leading label span straight onto the title text
+      // with no character between them — the gap the reader sees is that
+      // span's own CSS margin, invisible to textContent. Unpeeled, the dialog
+      // heading reads "CMSC001Project 3".
+      //
+      // The loop peels every KNOWN leading label in DOM order rather than
+      // assuming there is exactly one. On today's markup that is .course-tag
+      // and nothing else: §14 moved confidence OUT of the title into
+      // .row-meta, so .lead-conf is no longer inside .row-title and this
+      // selector simply does not match it. It stays in the list because it
+      // costs one no-op query and keeps this correct if a label ever moves
+      // back. (An earlier note here described a `.lead-conf::after` carrying
+      // " · " — there is no such rule in the stylesheet, and there is nothing
+      // for it to separate now that the confidence is on its own line.)
+      var labels = t.querySelectorAll(".course-tag, .lead-conf");
+      for (var i = 0; i < labels.length; i++) {
+        var txt = labels[i].textContent.trim();
+        if (txt && name.indexOf(txt) === 0) name = name.slice(txt.length).trim();
+      }
+      return name || "Detail";
+    }
+
+    // ---- structured detail ------------------------------------------------
+    // data-context is built by prompt 7h to a fixed field layout:
+    //
+    //   COURSE — kind: title            (tag names bare here on purpose:
+    //   Full detail: ...                  `title` bracketed is a real tag on
+    //   Date: ... [Location: ...]         line 1, and the render/gate regexes
+    //   Source: ...                       match it inside a comment too)
+    //   Links: Label: url
+    //
+    // Repeated field lines are MERGED rather than dropped, and "Links:" is
+    // the field that actually depends on it — see flush() below.
+    //
+    // Dumping that as one pre-wrap paragraph is what made it read as a wall of
+    // text. It is parsed back into labelled rows here — NOT re-authored by the
+    // pipeline, because the string is also the AI cache key (7f) and rewording
+    // it throws away every saved answer.
+    //
+    // Any line the parser does not recognise becomes a plain paragraph, so a
+    // future format change degrades to the old behaviour rather than dropping
+    // content. Nothing here uses innerHTML.
+    var FIELDS = ["Full detail", "Date", "Source", "Links", "Location"];
+
+    function linkify(parent, text) {
+      // Only bare http(s) runs become anchors, and the href is set via
+      // setAttribute on a node we made — never parsed as markup.
+      var re = /https?:\/\/[^\s<>"']+/g, last = 0, m;
+      while ((m = re.exec(text))) {
+        if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+        var a = document.createElement("a");
+        a.setAttribute("href", m[0]);
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+        a.textContent = m[0];
+        parent.appendChild(a);
+        last = m.index + m[0].length;
+      }
+      if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+    }
+
+    function detailNodes(ctx) {
+      var wrap = document.createElement("div");
+      var lines = String(ctx || "").split("\n");
+      var dl = null, current = null, order = [], seen = {};
+
+      function flush() {
+        if (!current) return;
+        // seen[key] holds the FIELD OBJECT. It held the number 1, so the
+        // merge branch evaluated `(1).value += ...` — an assignment to a
+        // property of a primitive, which outside strict mode is a silent
+        // no-op. A context carrying the same field twice therefore lost the
+        // second copy with no error anywhere, and two "Links:" lines is the
+        // ORDINARY case: the Links renderer below splits that field on "\n"
+        // precisely because it expects to have collected several.
+        if (!seen[current.key]) { order.push(current); seen[current.key] = current; }
+        else { seen[current.key].value += "\n" + current.value; }
+        current = null;
+      }
+
+      lines.forEach(function (raw, i) {
+        var line = raw.replace(/\s+$/, "");
+        if (!line.trim()) { flush(); return; }
+        var hit = null;
+        for (var f = 0; f < FIELDS.length; f++) {
+          if (line.indexOf(FIELDS[f] + ":") === 0) { hit = FIELDS[f]; break; }
+        }
+        if (hit) {
+          flush();
+          current = { key: hit, value: line.slice(hit.length + 1).trim() };
+        } else if (current) {
+          // A wrapped prose field rejoins with a space. Links do NOT: each
+          // line under "Links:" is its own link, and the renderer below
+          // splits that field on "\n" to get one list item each. Space-joining
+          // produced a single run-on item — the exact thing the split exists
+          // to prevent — for any context that sent its links as a block
+          // rather than as repeated "Links:" lines.
+          current.value += (current.key === "Links" ? "\n" : " ") + line.trim();
+        } else if (i === 0) {
+          var lead = document.createElement("p");
+          lead.className = "dl-lead";
+          lead.textContent = line.trim();             // the "COURSE — kind: title" line
+          wrap.appendChild(lead);
+        } else {
+          var p = document.createElement("p");
+          p.className = "fmt-p";
+          linkify(p, line.trim());
+          wrap.appendChild(p);
+        }
+      });
+      flush();
+
+      if (order.length) {
+        dl = document.createElement("div");
+        dl.className = "dl";
+        order.forEach(function (f) {
+          var k = document.createElement("div");
+          k.className = "dl-k";
+          k.textContent = f.key === "Full detail" ? "What" : f.key;
+          dl.appendChild(k);
+          var v = document.createElement("div");
+          v.className = "dl-v";
+          if (f.key === "Links") {
+            // One line per link, so several stop running together.
+            var ul = document.createElement("ul");
+            ul.className = "dl-links";
+            f.value.split("\n").forEach(function (l) {
+              if (!l.trim()) return;
+              var li = document.createElement("li");
+              linkify(li, l.trim());
+              ul.appendChild(li);
+            });
+            v.appendChild(ul);
+          } else {
+            linkify(v, f.value);
+          }
+          dl.appendChild(v);
+        });
+        wrap.appendChild(dl);
+      }
+      if (!wrap.childNodes.length) {
+        var none = document.createElement("p");
+        none.className = "fmt-p";
+        none.textContent = "No further detail was captured for this item.";
+        wrap.appendChild(none);
+      }
+      return wrap;
+    }
+ 
+    // Row-scoped only: "Show full detail" is the one caller left, and every
+    // caller is inside a .row/.tbl-row. (The page-level AI action used to
+    // have a second branch here, gathering every owed row into a workload
+    // list client-side — 2026-09-19: that gathering moved server-side, into
+    // service/app.py's `/ai/week`, which queries `items` directly rather
+    // than re-deriving the same set from the rendered DOM.)
+    function contextFor(el) {
+      var row = el.closest(".row, .tbl-row");
+      return row ? (row.dataset.context || "") : "";
+    }
+
+    // Menu open/close is independent of every capability, so Mark done,
+    // Resolved, Show full detail, Open in Canvas and Add reminder all keep
+    // working even when AI and the store are unavailable.
+    document.querySelectorAll('[data-action="row-menu"]').forEach(function (btn) {
+      // Resolved once, in this scope, because wireMenuKeys needs it too.
+      var menu = btn.parentNode.querySelector(".row-menu");
+      if (!menu) return;
+      // Every one of these buttons carried the SAME accessible name —
+      // "Actions" — so a screen reader moving down the page announced
+      // "Actions, button" once per row with nothing to tell them apart. The
+      // row's title is already computed for the dialog heading; reuse it.
+      // Done at runtime, so no row template needs a new placeholder and the
+      // rendered file the validation gate reads is byte-for-byte unchanged.
+      // `title` stays short: that is the hover tooltip, not the name.
+      var rowName = rowTitleFor(btn);
+      if (rowName && rowName !== "Detail") {
+        btn.setAttribute("aria-label", "Actions for " + rowName);
+      }
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var willOpen = menu.hidden;
+        closeAllMenus(menu, false);
+        menu.hidden = !willOpen;
+        btn.setAttribute("aria-expanded", willOpen ? "true" : "false");
+      });
+      wireMenuKeys(btn, menu);
+
+      // Phone-only close affordance (2026-09-19): below 640px .row-menu is a
+      // fixed action sheet, not a dropdown next to the thing that opened it,
+      // so "tap outside to dismiss" is a lot less discoverable -- the sheet
+      // itself covers a good chunk of the outside. .row-menu-close is
+      // display:none until that breakpoint's CSS shows it (same reasoning
+      // as the aria-label above: built at runtime so no row template needs
+      // a new placeholder and the rendered file stays byte-for-byte what
+      // the validation gate expects). Reuses .sheet-close's own look.
+      var closeBtn = document.createElement("button");
+      closeBtn.type = "button";
+      closeBtn.className = "row-menu-close sheet-close";
+      closeBtn.setAttribute("aria-label", "Close menu");
+      closeBtn.innerHTML = "&#215;";
+      closeBtn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        closeAllMenus(null, true);
+      });
+      menu.insertBefore(closeBtn, menu.firstChild);
+    });
+ 
+    // 2026-09-17 redesign: the design draws no visible control on a card, so
+    // the whole card is the target. A click anywhere on a row that is not
+    // itself a link, button or open menu opens that row's own menu. The
+    // three-dot button stays in the DOM (keyboard, screen readers, hover).
+    // .tbl-row (Where you stand, §16b) gets the same convenience.
+    document.querySelectorAll(".row, .tbl-row").forEach(function (row) {
+      var own = row.querySelector('[data-action="row-menu"]');
+      if (!own) return;
+      row.addEventListener("click", function (e) {
+        var t = e.target;
+        if (t && t.closest && t.closest("a, button, input, textarea, summary, .row-menu, .row-expand")) return;
+        e.stopPropagation();
+        own.click();
+      });
+    });
+ 
+    document.addEventListener("click", function () { closeAllMenus(null, false); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") closeAllMenus(null, true);
+    });
+    document.querySelectorAll(".row-menu").forEach(function (m) {
+      m.addEventListener("click", function (e) { e.stopPropagation(); });
+    });
+ 
+    document.querySelectorAll('[data-action="show-detail"]').forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        closeAllMenus(null, false);
+        var ctx = contextFor(btn);
+        if (openSheet(rowTitleFor(btn), btn)) {
+          sheetBody.appendChild(detailNodes(ctx));
+          return;
+        }
+        // No dialog support: fall back to the old in-row expansion rather
+        // than losing the control entirely.
+        var expand = expandFor(btn);
+        if (!expand) return;
+        if (expand.dataset.mode === "detail") { expand.hidden = !expand.hidden; return; }
+        expand.textContent = ctx || "No further detail was captured for this item.";
+        expand.dataset.mode = "detail";
+        expand.classList.remove("is-loading", "is-error");
+        expand.hidden = false;
+      });
+    });
+ 
+    // ---- BULK-RESOLVE (2026-09-19) ---------------------------------------
+    // Needs your attention can carry a real backlog (§7f's own overdue
+    // count) and resolving it one row at a time, one menu-open per item, is
+    // exactly the friction that lets it just grow. A checkbox per row plus
+    // one "Resolve selected" click for the lot -- built at runtime, same
+    // reasoning as the row-menu close button above: no row template needs a
+    // new placeholder, so the rendered file stays what the validation gate
+    // expects. Deliberately calls each row's OWN [data-action="mark-resolved"]
+    // button rather than adding a second network path: that button's click
+    // handler (STORES.forEach, script block 1) already hides the row,
+    // updates the empty-section note, and POSTs /attention/{id}/resolved
+    // correctly -- a second, parallel implementation here could only drift
+    // from it.
+    (function () {
+      var section = document.getElementById("section-attention");
+      if (!section) return;
+      var rows = Array.prototype.slice.call(
+        section.querySelectorAll(".attn .row[data-item-id]"));
+      if (!rows.length) return;
+
+      var selected = {};
+
+      var bar = document.createElement("div");
+      bar.className = "attn-bulk";
+      var allLabel = document.createElement("label");
+      allLabel.className = "attn-bulk-all";
+      var allBox = document.createElement("input");
+      allBox.type = "checkbox";
+      allBox.className = "attn-select";
+      allLabel.appendChild(allBox);
+      allLabel.appendChild(document.createTextNode("Select all"));
+      var count = document.createElement("span");
+      count.className = "attn-bulk-count";
+      var resolveBtn = document.createElement("button");
+      resolveBtn.type = "button";
+      resolveBtn.className = "act";
+      resolveBtn.textContent = "Resolve selected";
+      resolveBtn.disabled = true;
+      bar.appendChild(allLabel);
+      bar.appendChild(count);
+      bar.appendChild(resolveBtn);
+      var secHead = section.querySelector(".sec-head");
+      secHead.parentNode.insertBefore(bar, secHead.nextSibling);
+
+      function refresh() {
+        var n = Object.keys(selected).length;
+        count.textContent = n === 1 ? "1 selected" : n + " selected";
+        resolveBtn.disabled = n === 0;
+        var live = rows.filter(function (r) { return !r.classList.contains("is-done"); });
+        allBox.checked = live.length > 0 && n >= live.length;
+      }
+
+      rows.forEach(function (row) {
+        var id = row.dataset.itemId;
+        var box = document.createElement("input");
+        box.type = "checkbox";
+        box.className = "attn-select";
+        var nameEl = row.querySelector(".row-name");
+        box.setAttribute("aria-label",
+          "Select " + (nameEl ? nameEl.textContent.trim() : "this item"));
+        box.addEventListener("click", function (e) { e.stopPropagation(); });
+        box.addEventListener("change", function () {
+          if (box.checked) selected[id] = true; else delete selected[id];
+          refresh();
+        });
+        row.insertBefore(box, row.firstChild);
+      });
+
+      allBox.addEventListener("click", function (e) { e.stopPropagation(); });
+      allBox.addEventListener("change", function () {
+        rows.forEach(function (row) {
+          if (row.classList.contains("is-done")) return;
+          var box = row.querySelector(".attn-select");
+          if (!box) return;
+          box.checked = allBox.checked;
+          if (allBox.checked) selected[row.dataset.itemId] = true;
+          else delete selected[row.dataset.itemId];
+        });
+        refresh();
+      });
+
+      resolveBtn.addEventListener("click", function () {
+        var ids = Object.keys(selected);
+        if (!ids.length) return;
+        ids.forEach(function (id) {
+          var row = rows.filter(function (r) { return r.dataset.itemId === id; })[0];
+          var b = row && row.querySelector('[data-action="mark-resolved"]');
+          if (b) b.click();
+          delete selected[id];
+        });
+        refresh();
+      });
+    })();
+
+    // 2026-09-19: no capability to await any more -- fetch() is available
+    // from the first paint, so these wire up synchronously, same as every
+    // other button in this block. No removal-when-unavailable branch either:
+    // a request that fails just paints an error into the same surface a
+    // successful one would have used (see run()'s .catch below).
+    document.querySelectorAll('[data-action="ai"], [data-action="ai-page"]').forEach(function (btn) {
+      var rowExpand = expandFor(btn);
+      // rowExpand is the FALLBACK surface and is needed only where the
+      // dialog is missing. Requiring it unconditionally left the action
+      // completely dead — no handler at all, so a click did nothing and said
+      // nothing — on any row whose .row-expand the renderer had dropped,
+      // even though the dialog path never touches it.
+      if (!rowExpand && !canDialog) return;
+      var task = btn.dataset.task;
+      var mode = "ai:" + task;
+      var endpoint = "/ai/week";
+      if (btn.dataset.action !== "ai-page") {
+        var row = btn.closest(".row");
+        var itemId = row ? row.dataset.itemId : "";
+        if (!itemId) return; // every real row template carries ITEM_ID
+        endpoint = "/ai/" + encodeURIComponent(itemId) + "/" + encodeURIComponent(task);
+      }
+      // `expand` is whatever surface this click is painting into: the shared
+      // dialog where one exists, the row's own .row-expand where it
+      // does not. Both support textContent / classList / appendChild, so
+      // paint() and run() below are unchanged by the switch.
+      var expand = rowExpand;
+
+      function surface(reopen) {
+        if (canDialog) {
+          if (reopen || !sheet.open) openSheet(rowTitleFor(btn), btn);
+          return sheetBody;
+        }
+        rowExpand.hidden = false;
+        return rowExpand;
+      }
+
+      function paint(text, saved, label) {
+        expand = surface(false);
+        expand.textContent = "";
+        expand.classList.remove("is-loading", "is-error");
+        expand.setAttribute("aria-busy", "false");
+        var lab = document.createElement("span");
+        lab.className = "ai-label";
+        lab.textContent = (label || "Claude") + (saved ? " · saved" : "");
+        expand.appendChild(lab);
+        expand.appendChild(fmt(text));
+        expand.dataset.mode = mode;
+        expand.hidden = false;
+        // Regenerate belongs in the dialog's footer, not inside the answer:
+        // it is an action on the panel, and in the scrolling body a long
+        // answer pushed it out of sight.
+        if (canDialog && sheetFoot) {
+          sheetFoot.textContent = "";
+          sheetFoot.hidden = !saved;
+          if (saved) {
+            var again = document.createElement("button");
+            again.type = "button";
+            again.className = "act";
+            again.textContent = "Regenerate";
+            again.addEventListener("click", function (e) { e.stopPropagation(); run(true); });
+            sheetFoot.appendChild(again);
+            var note = document.createElement("span");
+            note.className = "prefs-status";
+            note.textContent = "Saved from an earlier run.";
+            sheetFoot.appendChild(note);
+          }
+        } else if (saved) {
+          var again2 = document.createElement("button");
+          again2.type = "button";
+          again2.className = "ai-regen";
+          again2.textContent = "Regenerate";
+          again2.addEventListener("click", function (e) { e.stopPropagation(); run(true); });
+          lab.appendChild(again2);
+        }
+      }
+
+      function run(force) {
+        expand = surface(true);
+        if (canDialog && sheetFoot) { sheetFoot.textContent = ""; sheetFoot.hidden = true; }
+        expand.hidden = false;
+        expand.classList.remove("is-error");
+        expand.classList.add("is-loading");
+        // The only sign anything is happening is the word "Thinking…" and
+        // an italic; neither reaches a screen reader on its own. aria-busy
+        // rather than aria-live on the surface: a live region would
+        // re-announce the whole answer on every streamed chunk.
+        expand.setAttribute("aria-busy", "true");
+        expand.textContent = "Thinking…";
+        btn.disabled = true;
+
+        fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ force: !!force })
+        }).then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (data) {
+            if (!res.ok) throw new Error((data && data.detail) || "Couldn't get an answer — try again.");
+            return data;
+          });
+        }).then(function (data) {
+          // An empty answer is reported as a failure rather than painted:
+          // painting and caching "" server-side would come back tomorrow as
+          // a saved empty answer with no second call to correct it.
+          var answer = typeof data.answer === "string" ? data.answer : "";
+          if (!answer.trim()) throw new Error("Came back empty — try again.");
+          paint(answer, !!data.saved, data.label);
+        }).catch(function (err) {
+          expand.classList.remove("is-loading");
+          expand.setAttribute("aria-busy", "false");
+          expand.classList.add("is-error");
+          expand.textContent = (err && err.message) || "Couldn't get an answer — try again.";
+        }).finally(function () {
+          btn.disabled = false;
+        });
+      }
+
+      btn.addEventListener("click", function () {
+        closeAllMenus(null, false);
+        // In the dialog, a second click on the same action re-opens the
+        // panel and re-asks the server, rather than toggling a hidden div —
+        // the panel is modal, so there is no "already showing but behind
+        // the row" state to toggle, and a saved answer comes back from the
+        // server instantly (§6.5's own reuse rule, now enforced server-side).
+        if (canDialog) { run(false); return; }
+        if (expand.dataset.mode === mode) { expand.hidden = !expand.hidden; return; }
+        run(false);
+      });
+    });
+  })();
+</script>
+<script>
+  // ============================================================
+  // PANE SWITCHING — the THIRD block in file order, and the one that also
+  // owns the print expansion below. Same rules as the other three: never
+  // retyped, never edited by the pipeline, spliced through byte-identical
+  // (prompt step 8, check 10 compares all FOUR).
+  // Rationale: Project Instructions §7.3.
+  //
+  // Deliberately NOT persisted. The pane the reader lands on is always Today,
+  // because obligations lead and a remembered pane could open on This week
+  // while something is due this morning. That is also why #pane-today is
+  // first in the DOM: with no script at all — the Drive archive copy, or a
+  // failed capability — every pane is simply visible in order, obligations
+  // first, rather than the page appearing empty.
+  // ============================================================
+  (function () {
+    var tabs = Array.prototype.slice.call(document.querySelectorAll(".pane-tab"));
+    var panes = Array.prototype.slice.call(document.querySelectorAll(".pane"));
+    if (tabs.length < 2 || !panes.length) return;
+
+    // A tab whose pane is not on the page must not be able to hide the panes
+    // that ARE. show() set `hidden` on every pane that did not match the
+    // requested id, so one id matching nothing — a pane the renderer dropped,
+    // a data-pane typo — hid all three and left the reader a page with tabs
+    // and no content under them. Now show() refuses an id it cannot satisfy,
+    // and the first call falls back to the first pane in the DOM, which is
+    // the obligations pane by construction (§7.3).
+    function paneExists(id) {
+      for (var i = 0; i < panes.length; i++) { if (panes[i].id === id) return true; }
+      return false;
+    }
+
+    function show(id, focus) {
+      if (!paneExists(id)) return;
+      panes.forEach(function (p) { p.hidden = (p.id !== id); });
+      tabs.forEach(function (t) {
+        var on = t.dataset.pane === id;
+        t.setAttribute("aria-selected", on ? "true" : "false");
+        t.tabIndex = on ? 0 : -1;
+        if (on && focus) t.focus();
+      });
+    }
+
+    tabs.forEach(function (t, i) {
+      t.addEventListener("click", function () { show(t.dataset.pane, false); });
+      t.addEventListener("keydown", function (e) {
+        var next = null;
+        if (e.key === "ArrowRight") next = tabs[(i + 1) % tabs.length];
+        else if (e.key === "ArrowLeft") next = tabs[(i - 1 + tabs.length) % tabs.length];
+        else if (e.key === "Home") next = tabs[0];
+        else if (e.key === "End") next = tabs[tabs.length - 1];
+        if (!next) return;
+        e.preventDefault();
+        show(next.dataset.pane, true);
+      });
+    });
+
+    // Only now hide the non-default panes. Until this runs they are all
+    // visible, which is the correct degraded state.
+    show(paneExists("pane-today") ? "pane-today" : panes[0].id, false);
+
+    // ---- THE OVERFLOW DISCLOSURE HAS TO BE OPEN ON PAPER ------------------
+    // The print stylesheet carries `details.more > * { display: revert }` for
+    // this, and it does not work in current engines: a closed details element
+    // hides its content through the ::details-content slot
+    // (content-visibility in Chromium, a display rule on the slot elsewhere),
+    // which a rule on the CHILDREN cannot reach. So the intent stated up
+    // there — "a printed briefing that omits rows it holds in its own DOM
+    // would be quietly incomplete" — was not actually being delivered, and
+    // the archive copy a reader opens months later printed without the
+    // demoted Coming-up rows.
+    //
+    // Setting the attribute is the only reliable way, and it must be undone
+    // afterwards so printing does not silently leave the page in a different
+    // state than it was read in. beforeprint/afterprint covers Chromium and
+    // Firefox; the matchMedia listener covers Safari, which has historically
+    // not fired those events. Both paths are idempotent, and only disclosures
+    // this code opened are closed again.
+    var forcedOpen = [];
+    function expandForPrint() {
+      forcedOpen = [];
+      Array.prototype.forEach.call(document.querySelectorAll("details.more"),
+        function (d) { if (!d.open) { d.open = true; forcedOpen.push(d); } });
+    }
+    function restoreAfterPrint() {
+      forcedOpen.forEach(function (d) { d.open = false; });
+      forcedOpen = [];
+    }
+    window.addEventListener("beforeprint", expandForPrint);
+    window.addEventListener("afterprint", restoreAfterPrint);
+    if (window.matchMedia) {
+      var mq = window.matchMedia("print");
+      var onPrintChange = function (e) {
+        if (e.matches) expandForPrint(); else restoreAfterPrint();
+      };
+      if (mq.addEventListener) mq.addEventListener("change", onPrintChange);
+      else if (mq.addListener) mq.addListener(onPrintChange);
+    }
+  })();
+</script>
+
+<script>
+  // ============================================================
+  // BRIEF PREFERENCES — the FOURTH and last block in file order. Same rules
+  // as the three above: never retyped, never edited by the pipeline, spliced
+  // through byte-identical (prompt step 8, check 10 compares all FOUR). It
+  // was the third of three until pane switching was inserted ABOVE it; the
+  // note here said "below" and the two blocks' self-numbering disagreed,
+  // which matters only because the renderer splices by position.
+  // Rationale: Project Instructions §12.
+  //
+  // PREF_SCHEMA is the single source of truth for BOTH the form the user
+  // sees and the JSON shape the pipeline reads back with read_db. Adding a
+  // question here changes both at once and cannot desync them; that is the
+  // whole reason the form is built in script instead of written as markup.
+  //
+  // The topic ids are calendar.umd.edu's OWN category slugs (§12.2), not
+  // labels invented here. That is what lets the run filter the feed by a
+  // stored answer without a translation table that can rot.
+  //
+  // Two documents, both even-segment paths as the store requires:
+  //   prefs/quiz         {version, updated_at, answers:{...}}
+  //   prefs/custom       {version, updated_at, text}
+  //   prefs/requirements {version, updated_at, entries:[{id, statement,
+  //                       keywords[], horizon_days, quiet_after_days, active}]}
+  //
+  // NOTE the asymmetry, and it is deliberate: quiz answers are stored as the
+  // STRINGS their option ids are (§12.2), but a requirement's horizon_days and
+  // quiet_after_days are parseInt'd on save. Requirements are consumed by
+  // arithmetic on the pipeline side — a horizon is added to a date, a quiet
+  // window is compared to a day count — and `"180" > 30` is the bug class
+  // §12.2 already had to write a rule about. Storing them as numbers puts the
+  // coercion in one place instead of every reader.
+  // They are separate so clearing one never touches the other, exactly as
+  // assignments/done and attention/resolved are separate (§6.2).
+  //
+  // Written by the viewer, read by the pipeline. NOT a channel by which
+  // page content can instruct the run: §1.7 fixes where these sit in the
+  // authority ladder, and the run treats the free-text field as a user
+  // instruction of bounded scope, never as permission to widen a boundary.
+  //
+  // Nodes are BUILT, never innerHTML — same discipline as the AI formatter.
+  // ============================================================
+  (function () {
+    var TOPICS = [
+      ["academics", "Academics"],
+      ["arts-entertainment-and-culture", "Arts, Entertainment & Culture"],
+      ["student-life", "Student Life"],
+      ["community-engagement", "Community Engagement"],
+      ["health-and-wellness", "Health & Wellness"],
+      ["research", "Research"],
+      ["diversity-inclusion", "Diversity & Inclusion"],
+      ["athletics-and-recreation", "Athletics & Recreation"],
+      ["spiritual-and-religious", "Spiritual & Religious"],
+      ["family-engagement", "Family Engagement"]
+    ];
+ 
+    // §13. Stored at prefs/requirements as its OWN document, not inside the
+    // quiz answers: it has a different shape, a different lifecycle, and
+    // clearing one must never touch the other — the same reasoning that keeps
+    // prefs/quiz and prefs/custom apart (§6.2).
+    var REQ_HORIZONS = [["90", "3 months"], ["180", "6 months"], ["365", "1 year"]];
+    var REQ_QUIET = [["14", "2 weeks"], ["30", "a month"], ["60", "2 months"]];
+
+    var PREF_SCHEMA = [
+      { id: "requirements", type: "requirements",
+        label: "What are you actually trying to make happen?",
+        help: "Each of these is a standing question the briefing goes looking for — " +
+              "not a topic filter. \"Get into a research group by spring\" is one. " +
+              "With none set, the briefing only reports what already reached you, " +
+              "and the Leads and Opportunities panes stay empty.",
+        doc: "requirements" },
+      { id: "coming_up_max", type: "single",
+        label: "How many rows should \"Coming up\" show before the rest, at most?",
+        help: "Extra rows beyond this move into Coming up's own \"show more\" " +
+              "disclosure — nothing is dropped, just tucked away so the " +
+              "section doesn't run long on a busy stretch. Added 2026-09-16.",
+        options: [["5", "5"], ["10", "10"], ["15", "15"], ["20", "20"], ["25", "25"]],
+        fallback: "10" },
+      { id: "attention_max", type: "single",
+        label: "How many rows should \"Needs your attention\" show before the rest, at most?",
+        help: "Applies only to ordinary rows — a pipeline System notice " +
+              "(like \"Gradescope needs a password set\") is always tucked " +
+              "behind the section's own disclosure regardless of this " +
+              "number. Added 2026-09-16.",
+        options: [["3", "3"], ["5", "5"], ["8", "8"], ["12", "12"], ["20", "20"]],
+        fallback: "8" },
+      { id: "topics", type: "tri", label: "Which kinds of campus events do you want to hear about?",
+        help: "These are the UMD calendar's own topic categories. Always = push it to me even on a busy day. Never = never show it, whatever else matches.",
+        items: TOPICS, fallback: "sometimes" },
+      { id: "goals", type: "multi", label: "What are you actually trying to get out of campus events?",
+        help: "Used to rank two events that match the same topic.",
+        options: [
+          ["career", "Career & internships"],
+          ["social", "Meeting people"],
+          ["academic_support", "Academic support"],
+          ["clubs", "Clubs & orgs"],
+          ["arts", "Arts & performance"],
+          ["fitness", "Sport & fitness"],
+          ["service", "Volunteering"],
+          ["research", "Research & labs"],
+          ["free_food", "Free food"]
+        ] },
+      { id: "units", type: "multi", label: "Any schools or units whose events you especially want?",
+        help: "Optional. An event tagged with one of these gets a boost.",
+        options: [
+          ["college-of-computer-mathematical-and-natural-sciences", "CMNS"],
+          ["a-james-clark-school-of-engineering", "Clark Engineering"],
+          ["college-of-arts-and-humanities", "Arts & Humanities"],
+          ["college-of-behavioral-and-social-sciences", "BSOS"],
+          ["robert-h-smith-school-of-business", "Smith Business"],
+          ["college-of-information", "Information"],
+          ["school-of-public-policy", "Public Policy"],
+          ["office-of-undergraduate-studies", "Undergraduate Studies"]
+        ] },
+      { id: "max_events", type: "single", label: "How many campus events per briefing, at most?",
+        help: "0 turns campus events off completely. The briefing keeps working. " +
+              "Widened to 10 on 2026-09-16 — \"Worth your time\" now renders " +
+              "to whatever you pick here rather than a fixed three rows, and " +
+              "the gate checks the page against this answer, not a constant.",
+        options: [["0", "None"], ["1", "1"], ["2", "2"], ["3", "3"], ["5", "5"], ["10", "10"]],
+        fallback: "2" },
+      { id: "horizon_days", type: "single", label: "How far ahead should campus events appear?",
+        options: [["7", "1 week"], ["14", "2 weeks"], ["30", "1 month"]], fallback: "14" },
+      { id: "avoid_class_conflicts", type: "single", label: "Hide events that clash with anything on your calendar?",
+        help: "Checked against your Class calendar AND your personal calendar. " +
+              "Until 2026-09-10 it was classes only, so anything you had booked " +
+              "yourself was invisible to it.",
+        options: [["yes", "Hide them"], ["no", "Show anyway"]], fallback: "yes" },
+      { id: "on_campus_only", type: "single", label: "On-campus events only?",
+        options: [["yes", "On campus only"], ["no", "Anywhere"]], fallback: "no" },
+      { id: "free_only", type: "single", label: "Only events with no ticket cost?",
+        help: "Applied only when the listing actually states a cost. An event that says nothing about price is not assumed to be paid.",
+        options: [["yes", "Free only"], ["no", "Either"]], fallback: "no" },
+      { id: "keywords_boost", type: "text", label: "Anything specific you want surfaced?",
+        help: "Comma-separated. Org names, topics, series — e.g. hackathon, ACM, quantum, Bhangra.",
+        rows: 2, max: 300 },
+      { id: "keywords_block", type: "text", label: "Anything you never want to see?",
+        help: "Comma-separated. Matched against title, description and tags.",
+        rows: 2, max: 300 },
+      { id: "custom", type: "text", label: "Custom instructions",
+        help: "Free-form, read in full before every briefing is written. Include or exclude things, set a tone, add context the run has no other way to know. Stored separately from the answers above and it wins where the two disagree.",
+        rows: 6, max: 2000, doc: "custom" }
+    ];
+ 
+    var VERSION = 1;
+    var body = document.querySelector('[data-role="prefs-body"]');
+    var statusEl = document.querySelector('[data-role="prefs-status"]');
+    // The form now lives in a dialog opened from the header cog. The old
+    // in-page panel — its own section heading, a two-line intro and a standing
+    // "Edit preferences" button plus a second link in the footer — is gone: it
+    // occupied roughly a third of a phone screen permanently to hold a control
+    // used once in a while, and opening it pushed nothing useful into view
+    // because the form appeared BELOW the fold it created.
+    var panel = document.getElementById("sheet-prefs");
+    var toggle = document.querySelector('[data-action="prefs-open"]');
+    var saveBtn = document.querySelector('[data-action="prefs-save"]');
+    if (!body || !panel || !toggle || !saveBtn) return;
+    var modal = typeof panel.showModal === "function";
+ 
+    // Working copy. Seeded from schema fallbacks so an unanswered quiz is a
+    // valid document rather than a special case the pipeline has to detect.
+    var answers = {};
+    var customText = "";
+    var requirements = [];
+    var loaded = false;
+
+    // An id is minted ONCE, on creation, and never re-derived from the
+    // statement. state.coverage.last_signal and the ledger (§3.7) key on it,
+    // so re-slugging an edited statement would orphan every recorded signal
+    // for that requirement and it would read as newly quiet.
+    // `taken` is the list of ids already claimed. Omitted, it falls back to
+    // the ids in `requirements`, which is right for the Add button. It MUST
+    // be passed from the load path: there the new array is still being built
+    // by .map(), so `requirements` is the OLD one — empty on a first load —
+    // and every entry missing an id was minted against an empty set. Two
+    // legacy entries whose statements slug the same way ("Get into a research
+    // group by spring" and the same line with a "!") both came out as
+    // `get-into-a-research-grou`. One id shared by two requirements means
+    // §3.7's ledger and state.coverage.last_signal cross-contaminate: one
+    // goes quiet and both read as quiet.
+    function mintId(statement, taken) {
+      var used = {};
+      if (taken) {
+        taken.forEach(function (id) { if (id) used[id] = true; });
+      } else {
+        requirements.forEach(function (r) { if (r && r.id) used[r.id] = true; });
+      }
+      var base = String(statement || "goal").toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-").slice(0, 24)
+        // Stripped AFTER the slice as well as before it: a 24-character cut
+        // lands mid-word often enough, and a trailing "-" then minted
+        // "…-grou--2" on the first collision.
+        .replace(/^-+|-+$/g, "") || "goal";
+      if (!used[base]) return base;
+      for (var n = 2; n < 999; n++) { if (!used[base + "-" + n]) return base + "-" + n; }
+      // 998 collisions on one slug is not a reachable state. Keep it
+      // deterministic anyway rather than reaching for Date.now(), which §3.3
+      // forbids as an id and which would mint a NEW id for the same
+      // requirement on every single load.
+      return base + "-" + Object.keys(used).length;
+    }
+ 
+    function defaults() {
+      var a = {};
+      PREF_SCHEMA.forEach(function (q) {
+        if (q.doc === "custom" || q.doc === "requirements") return;
+        if (q.type === "tri") {
+          a[q.id] = {};
+          q.items.forEach(function (it) { a[q.id][it[0]] = q.fallback; });
+        } else if (q.type === "multi") {
+          a[q.id] = [];
+        } else if (q.type === "text") {
+          a[q.id] = [];
+        } else {
+          a[q.id] = q.fallback;
+        }
+      });
+      return a;
+    }
+ 
+    function setStatus(msg, isError) {
+      // The status line is the one node in this dialog whose absence must not
+      // cost the reader the whole form: it is a caption, while body / panel /
+      // toggle / save are the form itself and are guarded above.
+      if (!statusEl) return;
+      statusEl.textContent = msg || "";
+      statusEl.classList.toggle("is-error", !!isError);
+    }
+ 
+    function splitList(s) {
+      return String(s || "").split(",").map(function (x) { return x.trim(); })
+        .filter(function (x) { return x.length > 0; }).slice(0, 25);
+    }
+
+    // A list field that legacy data may hold as something other than a list.
+    // `keywords` was written by an earlier version as the raw comma-separated
+    // string the input carries, and `(req.keywords || []).join(", ")` in the
+    // requirement row threw TypeError on it — inside build(), so ONE
+    // malformed entry took the entire preferences form down and the reader
+    // got an empty dialog with a Save button in it. Non-strings inside a real
+    // array are dropped too: a stored null would have joined as "null" into a
+    // visible input, which render rule 2 forbids.
+    function toList(v) {
+      if (Array.isArray(v)) {
+        return v.filter(function (x) { return typeof x === "string" && x.trim(); })
+                .map(function (x) { return x.trim(); }).slice(0, 25);
+      }
+      if (typeof v === "string") return splitList(v);
+      return [];
+    }
+ 
+    function chip(label, pressed, cls, onClick) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "chip" + (cls ? " " + cls : "");
+      b.textContent = label;
+      b.setAttribute("aria-pressed", pressed ? "true" : "false");
+      b.addEventListener("click", function () { onClick(b); });
+      return b;
+    }
+ 
+    function build() {
+      body.textContent = "";
+      PREF_SCHEMA.forEach(function (q) {
+        var wrap = document.createElement("div");
+        wrap.className = "pq";
+        var lab = document.createElement("div");
+        lab.className = "pq-label";
+        lab.textContent = q.label;
+        wrap.appendChild(lab);
+        if (q.help) {
+          var help = document.createElement("div");
+          help.className = "pq-help";
+          help.textContent = q.help;
+          wrap.appendChild(help);
+        }
+ 
+        if (q.type === "tri") {
+          q.items.forEach(function (it) {
+            var row = document.createElement("div");
+            row.className = "pq-tri";
+            var name = document.createElement("div");
+            name.className = "pq-tri-name";
+            name.textContent = it[1];
+            row.appendChild(name);
+            var opts = document.createElement("div");
+            opts.className = "pq-tri-opts";
+            [["always", "Always"], ["sometimes", "Sometimes"], ["never", "Never"]].forEach(function (o) {
+              var c = chip(o[1], answers[q.id][it[0]] === o[0],
+                o[0] === "never" ? "chip-never" : "", function () {
+                  answers[q.id][it[0]] = o[0];
+                  Array.prototype.forEach.call(opts.children, function (sib) {
+                    sib.setAttribute("aria-pressed", sib === c ? "true" : "false");
+                  });
+                });
+              opts.appendChild(c);
+            });
+            row.appendChild(opts);
+            wrap.appendChild(row);
+          });
+        } else if (q.type === "multi") {
+          var mopts = document.createElement("div");
+          mopts.className = "pq-opts";
+          q.options.forEach(function (o) {
+            var c = chip(o[1], answers[q.id].indexOf(o[0]) !== -1, "", function () {
+              var i = answers[q.id].indexOf(o[0]);
+              if (i === -1) {
+                answers[q.id] = answers[q.id].concat([o[0]]);
+                c.setAttribute("aria-pressed", "true");
+              } else {
+                answers[q.id] = answers[q.id].slice(0, i).concat(answers[q.id].slice(i + 1));
+                c.setAttribute("aria-pressed", "false");
+              }
+            });
+            mopts.appendChild(c);
+          });
+          wrap.appendChild(mopts);
+        } else if (q.type === "single") {
+          var sopts = document.createElement("div");
+          sopts.className = "pq-opts";
+          q.options.forEach(function (o) {
+            var c = chip(o[1], String(answers[q.id]) === o[0], "", function () {
+              answers[q.id] = o[0];
+              Array.prototype.forEach.call(sopts.children, function (sib) {
+                sib.setAttribute("aria-pressed", sib === c ? "true" : "false");
+              });
+            });
+            sopts.appendChild(c);
+          });
+          wrap.appendChild(sopts);
+        } else if (q.type === "requirements") {
+          var list = document.createElement("div");
+          wrap.appendChild(list);
+
+          // The Add button, so the remove-the-last-one case has somewhere to
+          // put focus. Assigned below, once it exists.
+          var addBtn = null;
+
+          // `focusAfter` says where focus goes once the list has been rebuilt:
+          // {index, sel} for a control inside the row at that index, or
+          // {addButton: true}. Omitted on the first draw, where focus belongs
+          // wherever the reader already put it. drawList() throws away every
+          // node it drew — including the button that was just pressed — so
+          // without this, Paused, Remove and Add each dropped focus onto the
+          // document and a keyboard user restarted from the top of the dialog.
+          var drawList = function (focusAfter) {
+            list.textContent = "";
+            if (!requirements.length) {
+              var none = document.createElement("div");
+              none.className = "req-empty";
+              none.textContent = "None set. The briefing will still track your " +
+                "coursework and calendar — it just won't go looking for anything.";
+              list.appendChild(none);
+            }
+            requirements.forEach(function (req, idx) {
+              var box = document.createElement("div");
+              box.className = "req" + (req.active ? "" : " is-off");
+
+              var head = document.createElement("div");
+              head.className = "req-head";
+              var stmt = document.createElement("input");
+              stmt.className = "req-stmt";
+              stmt.type = "text";
+              stmt.maxLength = 140;
+              stmt.value = req.statement || "";
+              stmt.placeholder = "e.g. Get into a research group by spring";
+              stmt.setAttribute("aria-label", "What you are trying to make happen");
+              stmt.addEventListener("input", function () { req.statement = stmt.value; });
+              head.appendChild(stmt);
+
+              var onoff = document.createElement("button");
+              onoff.type = "button";
+              onoff.className = "chip";
+              onoff.textContent = req.active ? "On" : "Paused";
+              onoff.setAttribute("aria-pressed", req.active ? "true" : "false");
+              onoff.addEventListener("click", function () {
+                req.active = !req.active;
+                // Same control, rebuilt row. Its label and aria-pressed both
+                // change, so the reader hears the new state announced.
+                drawList({ index: idx, sel: ".chip" });
+              });
+              head.appendChild(onoff);
+
+              var del = document.createElement("button");
+              del.type = "button";
+              del.className = "act req-del";
+              del.textContent = "Remove";
+              del.setAttribute("aria-label", "Remove this requirement");
+              del.addEventListener("click", function () {
+                requirements = requirements.slice(0, idx).concat(requirements.slice(idx + 1));
+                // The removed row cannot take focus back. The statement field
+                // of whatever now sits in that position is where the reader
+                // was heading; with nothing left, the Add button is the only
+                // thing in the list that can hold focus at all.
+                drawList(requirements.length
+                  ? { index: Math.min(idx, requirements.length - 1), sel: ".req-stmt" }
+                  : { addButton: true });
+              });
+              head.appendChild(del);
+              box.appendChild(head);
+
+              var sub = document.createElement("div");
+              sub.className = "req-sub";
+              var kwl = document.createElement("span");
+              kwl.className = "req-lbl";
+              kwl.textContent = "Words to watch:";
+              sub.appendChild(kwl);
+              var kw = document.createElement("input");
+              kw.className = "req-kw";
+              kw.type = "text";
+              kw.maxLength = 200;
+              kw.value = (req.keywords || []).join(", ");
+              kw.placeholder = "lab, reu, research assistant";
+              kw.setAttribute("aria-label", "Words to watch for this requirement");
+              kw.addEventListener("input", function () { req.keywords = splitList(kw.value); });
+              sub.appendChild(kw);
+              box.appendChild(sub);
+
+              // ONE ROW PER QUESTION. Both used to be appended into a single
+              // .req-sub, so "Tell me if it goes quiet for:" wrapped up beside
+              // the horizon chips and its own chips dropped to the line below
+              // — the label ended up reading as a caption for the wrong
+              // control. Two rows cost nothing and cannot mis-pair.
+              [["How far ahead to look:", "horizon_days", REQ_HORIZONS],
+               ["Tell me if it goes quiet for:", "quiet_after_days", REQ_QUIET]
+              ].forEach(function (spec) {
+                var row = document.createElement("div");
+                row.className = "req-sub";
+                var lab = document.createElement("span");
+                lab.className = "req-lbl";
+                lab.textContent = spec[0];
+                row.appendChild(lab);
+                var group = document.createElement("span");
+                group.className = "pq-opts";
+                spec[2].forEach(function (o) {
+                  var c = chip(o[1], String(req[spec[1]]) === o[0], "", function () {
+                    req[spec[1]] = o[0];
+                    Array.prototype.forEach.call(group.children, function (sib) {
+                      sib.setAttribute("aria-pressed", sib === c ? "true" : "false");
+                    });
+                  });
+                  group.appendChild(c);
+                });
+                row.appendChild(group);
+                box.appendChild(row);
+              });
+              list.appendChild(box);
+            });
+
+            if (!focusAfter) return;
+            if (focusAfter.addButton) {
+              if (addBtn) addBtn.focus();
+              return;
+            }
+            // list.children is only .req boxes here: the .req-empty note is
+            // drawn only when there are none, and that case takes the branch
+            // above.
+            var box = list.children[focusAfter.index];
+            var target = box ? box.querySelector(focusAfter.sel) : null;
+            if (target) target.focus();
+          };
+
+          drawList();
+          var add = document.createElement("button");
+          add.type = "button";
+          add.className = "act req-add";
+          add.textContent = "Add a requirement";
+          add.addEventListener("click", function () {
+            requirements = requirements.concat([{
+              // Minted against the ids currently in `requirements`. Deliberate
+              // that it is not derived from the statement: there is no
+              // statement yet, and §3.7 forbids re-deriving an id later, so a
+              // hand-added requirement is goal / goal-2 / goal-3 for the rest
+              // of its life. That is the documented trade and is unchanged.
+              id: mintId(""), statement: "", keywords: [],
+              horizon_days: "180", quiet_after_days: "30", active: true
+            }]);
+            // Straight into the new statement field: the requirement is
+            // nothing until it has one, and an unnamed entry is dropped on
+            // save.
+            drawList({ index: requirements.length - 1, sel: ".req-stmt" });
+          });
+          addBtn = add;
+          wrap.appendChild(add);
+        } else if (q.type === "text") {
+          var ta = document.createElement("textarea");
+          ta.className = "pq-text";
+          ta.rows = q.rows || 3;
+          ta.maxLength = q.max || 300;
+          // toList, not `|| []`: a text answer that legacy data stored as a
+          // bare string has no .join and threw here, inside build(), taking
+          // the whole form with it. The merge in load() normalises it now;
+          // this is the second line of defence on the same failure.
+          ta.value = q.doc === "custom" ? customText : toList(answers[q.id]).join(", ");
+          var count = document.createElement("div");
+          count.className = "pq-count";
+          function tally() {
+            count.textContent = ta.value.length + " / " + ta.maxLength;
+            count.classList.toggle("is-over", ta.value.length >= ta.maxLength);
+          }
+          ta.addEventListener("input", function () {
+            if (q.doc === "custom") customText = ta.value;
+            else answers[q.id] = splitList(ta.value);
+            tally();
+          });
+          tally();
+          wrap.appendChild(ta);
+          wrap.appendChild(count);
+        }
+        body.appendChild(wrap);
+      });
+    }
+ 
+    // §6.2's `db` capability doesn't exist under this service's plain
+    // FastAPI hosting -- replaced 2026-09-16 with a same-origin REST shim
+    // over `service/app.py`'s own `/prefs/*` endpoints (see the first script
+    // block's `restDb()` for the identical shape; duplicated rather than
+    // shared, matching how this file already keeps its locked blocks
+    // self-contained). This is what was silently producing "Couldn't save —
+    // nothing was changed" on every save: `window.claude` is undefined here,
+    // so `db` was always null and every write always took the failure branch.
+    function restDb() {
+      return {
+        doc: function (path) {
+          var url = "/" + path;
+          return {
+            get: function () {
+              return fetch(url).then(function (res) {
+                if (!res.ok) return { exists: false, data: function () { return null; } };
+                return res.json().then(function (body) {
+                  return { exists: true, data: function () { return body; } };
+                });
+              });
+            },
+            set: function (body) {
+              return fetch(url, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(body)
+              }).then(function (res) {
+                if (!res.ok) throw new Error("write failed: " + res.status);
+              });
+            }
+          };
+        }
+      };
+    }
+    var dbPromise = Promise.resolve(restDb());
+
+    var loading = null;
+
+    function load() {
+      if (loaded) return Promise.resolve();
+      // The cog calls load() on every click. Without this, a second click
+      // while the first read was still in flight started a second one, and
+      // both finished by resetting `answers` to the defaults and calling
+      // build() — rebuilding the form underneath the reader and discarding
+      // anything already typed into the copy the first build made.
+      if (loading) return loading;
+      answers = defaults();
+      loading = dbPromise.then(function (db) {
+        return Promise.all([
+          db.doc("prefs/quiz").get().catch(function () { return null; }),
+          db.doc("prefs/custom").get().catch(function () { return null; }),
+          db.doc("prefs/requirements").get().catch(function () { return null; })
+        ]).then(function (snaps) {
+          var q = snaps[0] && snaps[0].exists ? (snaps[0].data() || {}) : null;
+          var c = snaps[1] && snaps[1].exists ? (snaps[1].data() || {}) : null;
+          var rq = snaps[2] && snaps[2].exists ? (snaps[2].data() || {}) : null;
+          if (rq && Array.isArray(rq.entries) && rq.entries.length) {
+            // Normalize on read, not on write: a stored entry that predates a
+            // field appears with its default rather than as undefined, exactly
+            // as the quiz merge below does.
+            //
+            // TWO PASSES, because an id has to be unique across the whole set
+            // while minting happens one entry at a time. Pass 1 claims every
+            // id already stored — an id is minted once and never re-derived
+            // (§3.7), so a stored id always outranks a fresh slug. Pass 2
+            // fills the gaps against that claimed set, adding each id as it
+            // goes so two gaps cannot land on the same slug either.
+            //
+            // An entry that is not an object at all is dropped: it has no
+            // statement to task anything against, and every field access
+            // below would be on a primitive.
+            var raw = rq.entries.filter(function (e) {
+              return e && typeof e === "object";
+            });
+            var taken = [];
+            var ids = raw.map(function (e) {
+              var id = e.id ? String(e.id) : "";
+              // A duplicate id in the STORE is already broken — two entries
+              // under one key cannot be told apart by anything downstream —
+              // so the FIRST occurrence keeps it and the later one is treated
+              // as having no id. Re-minting the first instead would orphan
+              // the signals already recorded against it, which is the one
+              // outcome §3.7 rules out.
+              if (id && taken.indexOf(id) === -1) { taken.push(id); return id; }
+              return "";
+            });
+            raw.forEach(function (e, i) {
+              if (!ids[i]) {
+                ids[i] = mintId(e.statement, taken);
+                taken.push(ids[i]);
+              }
+            });
+            requirements = raw.map(function (e, i) {
+              return {
+                id: ids[i],
+                statement: typeof e.statement === "string" ? e.statement : "",
+                keywords: toList(e.keywords),
+                horizon_days: String(e.horizon_days || "180"),
+                quiet_after_days: String(e.quiet_after_days || "30"),
+                active: e.active !== false
+              };
+            });
+          }
+          if (q && q.answers && typeof q.answers === "object") {
+            // Merge over defaults so a question added in a later version of
+            // this schema appears with its fallback instead of undefined.
+            //
+            // The SHAPE OF THE DEFAULT decides how the stored value is taken,
+            // because a document written by an older version can disagree
+            // with it and `answers[k] = v` accepted anything. A multi-select
+            // stored as the string "career" then answered .indexOf() like a
+            // substring search — so the chip looked correctly pressed — and
+            // clicking a second chip ran .concat() on a string and stored
+            // "careersocial". A text answer stored as a string reached
+            // .join() in build() and threw, taking the form with it.
+            Object.keys(answers).forEach(function (k) {
+              var v = q.answers[k];
+              if (v === undefined || v === null) return;
+              var def = answers[k];
+              if (Object.prototype.toString.call(def) === "[object Object]") {
+                if (typeof v !== "object") return;     // keep the tri defaults
+                Object.keys(def).forEach(function (sub) {
+                  if (v[sub]) def[sub] = v[sub];
+                });
+              } else if (Array.isArray(def)) {
+                answers[k] = toList(v);
+              } else if (typeof v === "object") {
+                return;                                // keep the fallback
+              } else {
+                // §12.2 stores option ids as the STRINGS they are. A number
+                // that slipped in is coerced once, here, rather than in every
+                // reader — the same reasoning that parseInts the requirement
+                // horizons on save.
+                answers[k] = String(v);
+              }
+            });
+          }
+          if (c && typeof c.text === "string") customText = c.text;
+          setStatus(q || c || rq ? "Loaded your saved preferences."
+                                  : "No preferences saved yet — these are the defaults.");
+        }).catch(function () {
+          setStatus("Couldn't read saved preferences; showing defaults.", true);
+        });
+      }).then(function () {
+        loaded = true;
+        loading = null;
+        build();
+      });
+      return loading;
+    }
+ 
+    function save() {
+      saveBtn.disabled = true;
+      setStatus("Saving…");
+      // The two documents are written independently and reported on
+      // independently. Promise.all rejects on the first failure, which is why
+      // this used to say "nothing was changed" — a sentence that was simply
+      // untrue whenever the quiz landed and the custom text did not. A user
+      // who is told nothing was saved, when half of it was, will retype the
+      // half that already persisted and trust the panel less either way.
+      var now = new Date().toISOString();
+      return dbPromise.then(function (db) {
+        function put(path, body) {
+          return db.doc(path).set(body).then(
+            function () { return null; },
+            function () { return path; });
+        }
+        // Requirements with no statement are dropped rather than stored: an
+        // unnamed standing question cannot be tasked against anything, and
+        // storing it would make it look like coverage that does not exist.
+        var reqOut = requirements
+          .filter(function (r) { return (r.statement || "").trim(); })
+          .map(function (r) {
+            return { id: r.id, statement: r.statement.trim(),
+                     keywords: r.keywords || [],
+                     horizon_days: parseInt(r.horizon_days, 10) || 180,
+                     quiet_after_days: parseInt(r.quiet_after_days, 10) || 30,
+                     active: r.active !== false };
+          });
+        return Promise.all([
+          put("prefs/quiz", { version: VERSION, updated_at: now, answers: answers }),
+          put("prefs/custom", { version: VERSION, updated_at: now, text: customText }),
+          put("prefs/requirements", { version: VERSION, updated_at: now, entries: reqOut })
+        ]);
+      }).then(function (failed) {
+        var NAMES = { "prefs/quiz": "your answers",
+                      "prefs/custom": "the custom instructions",
+                      "prefs/requirements": "your requirements" };
+        var bad = failed.filter(function (x) { return x; });
+        if (!bad.length) {
+          setStatus("Saved. Tomorrow's briefing will use these.");
+        } else if (bad.length === failed.length) {
+          setStatus("Couldn't save — nothing was changed. Try again in a moment.", true);
+        } else {
+          // Name exactly what did not land. Saying "nothing was changed" when
+          // two of three did invites the user to retype what already persisted.
+          setStatus("Saved everything except " + bad.map(function (x) {
+            return NAMES[x] || x;
+          }).join(" and ") + ". Try saving again.", true);
+        }
+      }).catch(function () {
+        setStatus("Couldn't save — nothing was changed. Try again in a moment.", true);
+      }).finally(function () {
+        saveBtn.disabled = false;
+      });
+    }
+ 
+    toggle.addEventListener("click", function () {
+      if (modal) {
+        if (!panel.open) panel.showModal();
+      } else {
+        // No dialog support: fall back to showing it inline where it sits. It
+        // is the last element on the page, so it appends rather than displacing.
+        panel.setAttribute("open", "open");
+      }
+      load();
+    });
+ 
+    // Escape and the backdrop both close a dialog on their own; this only
+    // covers the explicit control and the non-dialog fallback.
+    panel.querySelectorAll('[data-action="sheet-close"]').forEach(function (b) {
+      b.addEventListener("click", function () {
+        if (modal && panel.open) panel.close(); else panel.removeAttribute("open");
+      });
+    });
+ 
+    saveBtn.addEventListener("click", save);
+  })();
+</script>

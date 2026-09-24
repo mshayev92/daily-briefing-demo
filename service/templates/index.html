@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>UMD Daily Briefing — service skeleton</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 640px;
+         margin: 40px auto; padding: 0 16px; color: #1a1a1a; }
+  .pill { display: inline-block; padding: 2px 8px; border-radius: 999px;
+          background: #eee; font-size: 0.85em; }
+  code { background: #f4f4f4; padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>UMD Daily Briefing — service skeleton</h1>
+  <p><span class="pill">Phase 0</span> FastAPI + SQLite, reachable over the
+     tailnet. No pipeline logic runs here yet.</p>
+  {% if meta %}
+    <ul>
+      <li>schema_version: <code>{{ meta['schema_version'] }}</code></li>
+      <li>items in store: <code>{{ item_count }}</code></li>
+      <li>last_completed_date: <code>{{ meta['last_completed_date'] }}</code></li>
+      <li>automation_mode: <code>{{ meta['automation_mode'] }}</code></li>
+    </ul>
+  {% else %}
+    <p>No state migrated yet — run <code>migrate_state.py</code>.</p>
+  {% endif %}
+</body>
+</html>
+
+<script>
+async function apiCall(endpoint, method = 'POST', body = null) {
+  const options = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) options.body = JSON.stringify(body);
+  try {
+    const res = await fetch(endpoint, options);
+    if (!res.ok) {
+      const errText = await res.text();
+      alert(`Action failed (${res.status}): ${errText}`);
+    } else {
+      location.reload();
+    }
+  } catch (err) {
+    alert(`Network error: ${err.message}`);
+  }
+}
+
+function markDone(itemId) { apiCall(`/items/${itemId}/done`); }
+function resolveAttention(itemId) { apiCall(`/attention/${itemId}/resolved`); }
+function toggleFeedback(itemId, rating) { apiCall(`/feedback/${itemId}`, 'POST', { rating }); }
+</script>

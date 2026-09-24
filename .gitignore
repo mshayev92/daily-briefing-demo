@@ -1,0 +1,34 @@
+# Google OAuth credentials
+credentials.json
+token.json
+send_token.json
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environment
+venv/
+
+# Environment/secrets
+.env
+.env.*
+
+# Personal data: real email/coursework content lives in these, not code.
+service/briefing.db
+service/briefing.db-*
+service/briefing.db.*
+service/college_assistant_ledger.jsonl
+college_assistant_state_*.json
+.last_briefing_email_sent
+logs/
+
+# macOS AppleDouble/Time-Machine junk
+.DS_Store
+._*
+
+# Point-in-time backups, not the live source tree
+.pre_redesign_backup/
+.actionability_backup_20260918/
+.claude/worktrees/

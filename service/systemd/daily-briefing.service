@@ -1,0 +1,11 @@
+[Unit]
+Description=UMD Daily Briefing -- refresh Canvas, build and deliver today's brief
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/daily-briefing/service/run_daily.sh
+# Canvas refresh (<=15 min) + LLM calls + render; generous but bounded.
+TimeoutStartSec=45min
+Nice=5

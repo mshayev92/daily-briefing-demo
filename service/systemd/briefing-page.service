@@ -1,0 +1,13 @@
+[Unit]
+Description=UMD Daily Briefing page (FastAPI on 127.0.0.1:8811, exposed via tailscale serve)
+After=network.target
+
+[Service]
+WorkingDirectory=%h/daily-briefing/service
+ExecStart=%h/daily-briefing/venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 8811
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the UMD Daily Briefing every morning
+
+[Timer]
+# 6:30 AM local (America/New_York): delivered before an 8 AM class.
+OnCalendar=*-*-* 06:30:00
+# A laptop asleep at 6:30 runs it on wake instead of skipping the day.
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
