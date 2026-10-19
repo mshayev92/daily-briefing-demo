@@ -30,6 +30,7 @@ sys.path.insert(0, ROOT)
 
 import db as dbmod
 import state_io_sqlite
+import briefing_google
 import google_api
 
 STAMP_FMT = "%Y-%m-%dT%H%M%SZ"
@@ -67,16 +68,16 @@ def _parse_stamp(name):
         return None
 
 
-def prune_drive(folder_id, keep=DEFAULT_RETENTION, root=ROOT):
+def prune_drive(folder_id, keep=DEFAULT_RETENTION):
     """Keep the `keep` most recent backups; trash the rest through the same
-    name-enforced guard §1.2 uses for state files (google_api.TRASHABLE)."""
-    entries = google_api.list_folder(folder_id, NAME_PREFIX, root=root)
+    name-enforced guard §1.2 uses for state files (briefing_google.TRASHABLE)."""
+    entries = google_api.list_folder(folder_id, NAME_PREFIX)
     dated = [(ts, e) for e in entries
             for ts in (_parse_stamp(e["name"]),) if ts is not None]
     dated.sort(key=lambda p: p[0], reverse=True)
     trashed = []
     for _ts, e in dated[keep:]:
-        google_api.trash(e["id"], name=e["name"], root=root)
+        briefing_google.trash(e["id"], name=e["name"])
         trashed.append(e["name"])
     return trashed
 
@@ -94,8 +95,7 @@ def run(db_path=dbmod.DEFAULT_DB_PATH, keep=DEFAULT_RETENTION,
     name, path = make_backup(db_path)
     try:
         file_id = google_api.create_file_from_path(
-            folder_id, name, path, mimetype="application/x-sqlite3",
-            root=ROOT)
+            folder_id, name, path, mimetype="application/x-sqlite3")
     finally:
         if cleanup_local:
             os.remove(path)

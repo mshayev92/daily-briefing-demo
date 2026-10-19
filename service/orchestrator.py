@@ -61,13 +61,14 @@ that step (`_guarded`); a crash of the whole run is recorded and the day's
 email becomes a failure notice (`_record_crash`).
 """
 
+import difflib
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
-from datetime import date as _date, datetime, time as _time, timezone
+from datetime import date as _date, datetime, time as _time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -82,8 +83,10 @@ import schedule
 import feedback
 import run_stats
 import google_api
+import briefing_google
 import collect
 import opportunity
+import applications
 import ledger
 import reminder_url
 import llm_cli
@@ -95,6 +98,12 @@ import store
 import digest
 import research
 import campus
+import cancellations
+import relative_dates
+import handshake
+import sources
+import watches
+import shared_browser
 
 TZ = ZoneInfo("America/New_York")
 
@@ -166,15 +175,20 @@ def _normalize_course(raw, state, kind=None):
 class Run:
     """Accumulates one run's facts, mirroring what STEP 0 establishes."""
 
-    def __init__(self, db_path=dbmod.DEFAULT_DB_PATH, dry_run=True):
+    def __init__(self, db_path=dbmod.DEFAULT_DB_PATH, dry_run=True,
+                 due_only=False):
         self.db_path = db_path
         self.dry_run = dry_run
+        # Fetch only the sources sources.py says are due (the timers), not
+        # every enabled one (a run started by hand).
+        self.due_only = due_only
         # Co-located with db_path, never a fixed path: a run against a
         # scratch/test copy of briefing.db must never touch the real
         # account's multi-year history.
         self.ledger_path = ledger.default_path(os.path.dirname(
             os.path.abspath(db_path)))
-        self.errors = []       # appended to state.errors at STEP 11
+        self.errors = []       # written by persist_errors()
+        self._persisted = 0    # how many of them briefing.db already has
         self.skipped = []      # §9.6 -- steps that truncated themselves
         self.moved_ids = []    # STEP 3's date-move tracking, for §5.0
         self.emails_processed = 0  # STEP 1 threads actually read+extracted
@@ -185,6 +199,20 @@ class Run:
                 "%Y-%m-%dT%H:%M:%SZ"),
             "source": source, "severity": severity, "message": message,
         })
+
+    def persist_errors(self):
+        """Append the errors not yet in briefing.db. Idempotent: the success
+        path and the crash path both call it, and a dry run writes nothing."""
+        new = self.errors[self._persisted:]
+        if self.dry_run or not new:
+            return
+        conn = dbmod.connect(self.db_path)
+        try:
+            store.append_errors(conn, new)
+            conn.commit()
+        finally:
+            conn.close()
+        self._persisted = len(self.errors)
 
 
 def as_date_safe(value):
@@ -220,7 +248,7 @@ def step0_facts(run):
 
     dbmod.init_db(run.db_path)
     llm_cli.reset_accounting(RUN_LLM_BUDGET_USD)
-    health = google_api.health(root=ROOT)
+    health = google_api.health()
     if health["ok"] and health["severity"] == "MAJOR":
         run.log_error("step0", "MAJOR", health["message"])
     elif not health["ok"]:
@@ -249,12 +277,60 @@ def step0_facts(run):
                           "(%s) -- widening sourcing windows to cover the "
                           "gap, capped at 14 days" % (gap, lcd))
 
+    settings = sources.load_settings(run.db_path)
+    enabled = {n for n, s in settings.items() if s["enabled"]}
+    fetch = set(sources.due_now(run.db_path, now_et)) if run.due_only \
+        else set(enabled)
+
     return {
         "today": today, "now_et": now_et, "start_time": start_time,
         "state": state, "health": health, "is_repeat": is_repeat,
         "missed_gap_days": missed_gap_days,
         "comparable": (lcd is not None and not missed_gap_days),
+        "sources": {"enabled": enabled, "fetch": fetch & enabled},
     }
+
+
+def _source_step(run, ctx, name, step, fn, default, *args, cache=False,
+                 **kwargs):
+    """Run one pipeline source's step under the Sources settings
+    (sources.py): off -> `default`; on but not due this build -> `default`,
+    or with `cache` the value fetched earlier today; otherwise fetch it,
+    record the outcome for the Sources sheet and, with `cache`, keep it for
+    later builds today. An unexpected exception degrades like _guarded()."""
+    src = ctx["sources"]
+    label = sources.SOURCES[name]["label"]
+    if name not in src["enabled"]:
+        run.skipped.append("%s: %s is turned off in Sources" % (step, label))
+        return default
+    if name not in src["fetch"] and not run.dry_run:
+        hit = sources.cache_get(run.db_path, name, ctx["today"]) \
+            if cache else None
+        if hit is not None:
+            return hit
+        if not cache:
+            # "not needed": a schedule, not a gap -- _run_events() keeps it
+            # out of What I can't see (it showed on every hourly rebuild).
+            run.skipped.append("%s: not needed -- %s is not due this build"
+                               % (step, label))
+            return default
+    before = len(run.errors)
+    try:
+        value = fn(*args, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        run.log_error(step, "MAJOR", "%s failed unexpectedly: %s: %s -- "
+                      "continuing without it" % (step, type(exc).__name__,
+                                                 exc))
+        value = default
+    if run.dry_run:
+        return value
+    failed = [e for e in run.errors[before:]
+              if e["severity"] in ("MAJOR", "CRITICAL")]
+    sources.record(run.db_path, name, not failed,
+                   detail=failed[0]["message"] if failed else None)
+    if cache and value and not failed:
+        sources.cache_put(run.db_path, name, ctx["today"], value)
+    return value
 
 
 def _empty_state():
@@ -316,6 +392,18 @@ _CANDIDATE_SCHEMA = {
                             "required": ["label", "url"]}},
                     "confidence": {"type": ["string", "null"],
                                   "enum": ["confirmed", "inferred", None]},
+                    # True when the message says a class meeting or event
+                    # is canceled / not happening; due_date is that
+                    # meeting's date.
+                    "cancellation": {"type": "boolean"},
+                    # True when the message moves an existing item's due
+                    # date; title names that item, due_date is the new one.
+                    "due_change": {"type": "boolean"},
+                    # A decision on an application the student submitted.
+                    "application_status": {
+                        "type": ["string", "null"],
+                        "enum": ["selected", "interview", "offer",
+                                 "rejected", None]},
                 },
                 "required": ["thread_id"],
             },
@@ -375,6 +463,30 @@ as `title` (e.g. "Midterm Exam 1"), not a headline like "Exam 1 update".
 listserv that lists several distinct opportunities or events gets one \
 entry per item a college student might act on (at most 10 per thread), \
 each with the same `thread_id`. Skip items with no date, deadline or action.
+- `cancellation`: true ONLY when the message says a specific class \
+meeting, discussion, lab, office hour or event is canceled, called off or \
+"will not meet" ("no discussion tomorrow", "class is canceled Friday"). \
+Then `title` names the class/event ("MATH001 discussion"), `due_date` is \
+the date of the canceled meeting, and `kind` is "event". Give ONE \
+candidate per canceled meeting date ("no class today or Wednesday" is two). A postponed or \
+moved meeting is NOT a cancellation. False/omitted otherwise.
+- `due_change`: true ONLY when the message says an existing assignment, quiz, \
+discussion post or exam is due on a NEW date: extended, pushed back, moved up \
+or "now due", or when it simply states when a named assignment is due \
+("Chapter 13 Smartbook is due tonight", "homework is due tomorrow"): the \
+instructor's stated date wins over Canvas, so give one candidate per \
+assignment named. Resolve "tonight"/"tomorrow" from the message's Date \
+header. Then `title` names that item as the course names it (copy the \
+name, e.g. "Discussion Post 5"), `due_date` is the NEW due date, `due_time` is \
+the new time if one is given, and `kind` is "assignment" or "assessment". A \
+newly announced assignment is NOT a due change. False/omitted otherwise.
+- `application_status`: set ONLY when the message is a decision on an \
+application the student submitted to a program, job, fellowship or \
+internship: "selected" (accepted into it, chosen, "congratulations, you have \
+been selected"), "interview" (invited to interview), "offer" (job or \
+internship offer), "rejected" (not selected). Then `title` is that \
+opportunity's name as the message gives it. A request to apply, a deadline \
+reminder or a confirmation of receipt is NOT a decision. Null otherwise.
 - The newest message in a thread comes first; when messages disagree, the \
 newest one wins.
 - If a thread has nothing extractable (a read-receipt, spam, a newsletter \
@@ -475,7 +587,7 @@ def _resolve_label_ids(run, ctx):
     """
     state = ctx["state"]
     try:
-        live_labels = google_api.labels(root=ROOT)
+        live_labels = google_api.labels()
     except Exception as exc:
         run.log_error("step1", "MAJOR",
                       "could not list Gmail labels: %s -- sweep cannot file "
@@ -610,6 +722,18 @@ _UMD_QUERY = ('{in:inbox (from:umd.edu newer_than:4d)} -label:College/Processed 
               '-in:sent -in:drafts -in:spam -in:trash -subject:"Daily Briefing"')
 EXTRACT_WORKERS = 3
 EXTRACT_THINKING_TOKENS = 1024
+# Canvas's own notification emails restate what canvas-scraper reads from
+# the Canvas API directly (assignments, due dates, announcements via What
+# changed). Extracting them produced second copies under other names
+# ("Homework 4" for Canvas's "HW Chap 04") that reconcile could not match,
+# so Canvas stays the only source for Canvas content (2026-09-24). They are
+# still labeled and archived; they are never read into candidates.
+_CANVAS_NOTIFICATION_RE = re.compile(r"@instructure\.com\b", re.I)
+
+
+def is_canvas_notification(body):
+    return bool(_CANVAS_NOTIFICATION_RE.search(
+        (body.get("headers") or {}).get("From") or ""))
 
 
 def _extract_batch(run, ctx, bodies):
@@ -637,6 +761,18 @@ def _extract_batch(run, ctx, bodies):
     return by_thread
 
 
+def _sent_date(body):
+    """ISO date (ET) a thread's newest message was sent: the day its
+    relative wording ("tomorrow") was written against. None if unreadable."""
+    from email.utils import parsedate_to_datetime
+    try:
+        stamp = parsedate_to_datetime(body["headers"]["Date"])
+        return (stamp.astimezone(TZ) if stamp.tzinfo else stamp).date()\
+            .isoformat()
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def step1_2_gmail_sweep(run, ctx, batch_size=8):
     """STEP 1 (sweep + label, real) + STEP 2 (extraction via llm_cli).
 
@@ -650,7 +786,7 @@ def step1_2_gmail_sweep(run, ctx, batch_size=8):
     """
     from concurrent.futures import ThreadPoolExecutor
 
-    threads = google_api.search_threads(_UMD_QUERY, root=ROOT)
+    threads = google_api.search_threads(_UMD_QUERY)
     if not threads:
         return []
     if len(threads) > 75:
@@ -665,13 +801,15 @@ def step1_2_gmail_sweep(run, ctx, batch_size=8):
     retry_ids, bodies = set(), []
     for t in threads:
         try:
-            bodies.append(google_api.thread_bodies(t["id"], root=ROOT))
+            bodies.append(google_api.thread_bodies(t["id"]))
         except Exception as exc:
             retry_ids.add(t["id"])
             run.log_error("step1", "MINOR",
                           "could not read thread %s: %s -- left "
                           "unprocessed for the next run" % (t["id"], exc))
 
+    canvas_ids = {b["id"] for b in bodies if is_canvas_notification(b)}
+    bodies = [b for b in bodies if b["id"] not in canvas_ids]
     batches = [bodies[i:i + batch_size]
                for i in range(0, len(bodies), batch_size)]
     by_thread = {}
@@ -688,11 +826,13 @@ def step1_2_gmail_sweep(run, ctx, batch_size=8):
                               "threads: %s -- left unprocessed so the next "
                               "run retries them" % (len(batch), exc))
 
+    sent_on = {b["id"]: _sent_date(b) for b in bodies}
     all_candidates = []
     for tid, cands in by_thread.items():
         for cand in cands:
             if cand.get("no_candidate") or not cand.get("title"):
                 continue
+            cand["sent_date"] = sent_on.get(tid)
             cand["course"] = _normalize_course(
                 cand.get("course"), ctx["state"], cand.get("kind"))
             _coerce_candidate(run, cand)
@@ -712,7 +852,8 @@ def step1_2_gmail_sweep(run, ctx, batch_size=8):
         if course in labels["courses"] and labels["courses"][course].get(
                 "gmail_label_id"):
             add_ids.append(labels["courses"][course]["gmail_label_id"])
-        elif course == "CS-Advising" and labels["system"].get("canvas_other"):
+        elif (t["id"] in canvas_ids or course == "CS-Advising") and \
+                labels["system"].get("canvas_other"):
             add_ids.append(labels["system"]["canvas_other"])
         elif labels["system"].get("unsorted"):
             add_ids.append(labels["system"]["unsorted"])
@@ -723,7 +864,7 @@ def step1_2_gmail_sweep(run, ctx, batch_size=8):
         try:
             google_api.relabel(
                 t["id"], add=add_ids,
-                remove=["INBOX"] if archive else (), root=ROOT)
+                remove=["INBOX"] if archive else ())
         except Exception as exc:
             run.log_error("step1", "MINOR",
                           "labeling failed for thread %s: %s" % (t["id"], exc))
@@ -859,6 +1000,46 @@ def _match_key(item):
     if ck and item.get("kind") == "assignment" and item.get("date"):
         return ("chapter", item.get("course"), ck, item.get("date"))
     return None
+
+
+def _collapse_repeated_opportunities(run, items):
+    """The same opportunity arriving again in a later email gets a new row:
+    its id takes a -2 or -3 suffix (_dedupe_id, step3_reconcile), and the
+    page shows it twice. Two open opportunities with the same title,
+    organization and date are one thing. Keep the one he tracks, else the
+    one seen first; expire the other as a duplicate and move its sources to
+    the keeper. Title, organization and date must all match, so two real
+    roles at one employer stay separate.
+    """
+    OPEN_ST = ("new", "ongoing", "unresolved", "snoozed")
+    try:
+        tracked = set(store.applications_all(run.db_path))
+    except Exception:  # noqa: BLE001 -- without it the first-seen rule decides
+        tracked = set()
+    groups = {}
+    for it in items:
+        if it.get("kind") != "opportunity" or it.get("status") not in OPEN_ST:
+            continue
+        org = (it.get("opportunity") or {}).get("organization") or \
+            it.get("organizer") or ""
+        key = (_normalize_title_for_match(it.get("title")),
+               " ".join(str(org).lower().split()), it.get("date"))
+        groups.setdefault(key, []).append(it)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        group.sort(key=lambda it: (it.get("id") not in tracked,
+                                   str(it.get("first_seen") or "9999"),
+                                   str(it.get("id") or "")))
+        keeper = group[0]
+        for dup in group[1:]:
+            keeper["source_refs"] = _merge_source_refs(
+                keeper.get("source_refs"), dup.get("source_refs"))
+            dup["status"] = "expired"
+            dup["expired_reason"] = "duplicate of %s" % keeper.get("id")
+            run.log_error("step3", "INFO", "%s repeats %s (same title, "
+                          "organization and date); expired as a duplicate"
+                          % (dup.get("id"), keeper.get("id")))
 
 
 def _collapse_shadowed_duplicates(run, items):
@@ -1020,6 +1201,7 @@ def step3_reconcile(run, ctx, candidates):
     _repair_stored_dates(run, items)
     _promote_opportunities(run, items)
     if not candidates:
+        _collapse_repeated_opportunities(run, items)
         _collapse_shadowed_duplicates(run, items)
         _flag_digest_events(run, ctx, items)
         return items
@@ -1057,6 +1239,12 @@ def step3_reconcile(run, ctx, candidates):
 
     existing_by_key = {}
     for it in items:
+        # Campus events belong to calendar.umd.edu (STEP 5b), which rewrites
+        # them every run. An email sighting with the same title must not
+        # "move" one: 5b then restores the calendar date, leaving a Moved
+        # entry that contradicts the row beside it (2026-09-25, men's soccer).
+        if str(it.get("id", "")).startswith("campus-"):
+            continue
         k = (it.get("course"), _normalize_title_for_match(it.get("title")))
         existing_by_key.setdefault(k, []).append(it)
 
@@ -1132,8 +1320,12 @@ def step3_reconcile(run, ctx, candidates):
                         "time")
                 if not outranked or not match.get("detail"):
                     match["detail"] = merged_detail or match.get("detail")
+                    if merged_detail and primary.get("sent_date"):
+                        match["text_anchor"] = primary["sent_date"]
                 match["source_refs"] = _merge_source_refs(
                     match.get("source_refs"), source_refs)
+                if primary.get("cancellation"):
+                    match["cancellation"] = True
                 if canvas_member is not None:
                     for k in ("canvas_submission", "points_possible"):
                         if canvas_member.get(k) is not None:
@@ -1204,9 +1396,12 @@ def step3_reconcile(run, ctx, candidates):
                     "times_surfaced": 0,
                     "source_refs": source_refs,
                     "first_seen": ctx["today"].isoformat(),
+                    "text_anchor": primary.get("sent_date"),
+                    "cancellation": bool(primary.get("cancellation")),
                 })
                 if primary.get("kind") == "opportunity":
                     items[-1]["opportunity"] = _opportunity_fields(primary)
+    _collapse_repeated_opportunities(run, items)
     _collapse_shadowed_duplicates(run, items)
     _flag_digest_events(run, ctx, items)
     return items
@@ -1248,8 +1443,10 @@ def _flag_digest_events(run, ctx, items):
 
 
 # canvas-scraper runs on its own schedule (run_daily.sh refreshes it right
-# before the briefing when it can). Older than this, the page says so.
-CANVAS_STALE_HOURS = 30
+# before the briefing when it can). Older than this, the page says so. Was
+# 30, which let a failed morning refresh (expired Canvas login, 2026-09-24)
+# pass silently: the previous day's scrape is only ~24h old.
+CANVAS_STALE_HOURS = 20
 
 
 def _load_canvas_scrape(run):
@@ -1272,7 +1469,7 @@ def _load_canvas_scrape(run):
             "canvas-scraper", "MAJOR",
             "Canvas data is %.1f days old (last scraped %s) -- due dates, "
             "submissions and grades may be out of date; run `canvas "
-            "refresh` in ~/canvas-scraper" % (age / 24.0,
+            "refresh` in ~/projects/canvas-scraper" % (age / 24.0,
                                               scrape.get("scraped_at")))
     return scrape
 
@@ -1317,7 +1514,159 @@ def _canvas_scraper_candidates(run, ctx):
     return out
 
 
-# --- STEP 4: schedule (§2.2 -- Class + personal calendars, today only) -----
+_SYLLABUS_TITLE_RE = re.compile(r"^\s*([A-Za-z]{3,5}\s?\d{3}[A-Za-z]?)\s*:\s*(.+?)\s*$")
+_SYLLABUS_ASSESSMENT_RE = re.compile(r"\b(exam|midterm|final|quiz)\b", re.I)
+_SYLLABUS_WINDOW_DAYS = 120
+
+
+_OPEN_STATUSES = ("new", "ongoing", "unresolved", "snoozed")
+RENAME_MIN_SIMILARITY = 0.6       # a moved or renamed event, title alone
+SAME_DAY_MIN_SIMILARITY = 0.3     # same course and day: a little title overlap
+
+
+def _follow_syllabus_calendar(state, events, first, last):
+    """Keep tracked items that only the syllabus calendar sourced in step with
+    that calendar. `first`..`last` (dates) is the window the events were read
+    for; only items dated inside it are judged. The caller runs this after a
+    good read, so a failed read changes nothing.
+
+    An item whose event title is gone follows the event that replaced it: same
+    course and same day, or a title close to the old one. It takes that
+    event's title, date and kind. An item with no such event expires. An event
+    already tracked under its own title is never taken."""
+    titles = {str(e.get("title") or "").strip() for e in events}
+    tracked = {(it.get("course"), _normalize_title_for_match(it.get("title")))
+               for it in state.get("items") or ()
+               if it.get("status") in _OPEN_STATUSES}
+    free = []
+    for e in events:
+        m = _SYLLABUS_TITLE_RE.match(e.get("title") or "")
+        if not m:
+            continue
+        course = _normalize_course(m.group(1), state)
+        if (course, _normalize_title_for_match(m.group(2))) not in tracked:
+            free.append((e, course, m.group(2)))
+    for it in state.get("items") or ():
+        if it.get("status") not in _OPEN_STATUSES:
+            continue
+        refs = [r for r in it.get("source_refs") or () if isinstance(r, dict)]
+        ids = [r.get("event_id") for r in refs if r.get("source") == "gcal_syllabi"]
+        if not ids or len(ids) != len(refs):
+            continue
+        due = as_date_safe(it.get("date"))
+        if not due or not first <= due <= last:
+            continue
+        if any(i in titles for i in ids):
+            continue
+        successor = _syllabus_successor(it, due, free)
+        if successor:
+            free.remove(successor)
+            _take_syllabus_event(it, *successor)
+        else:
+            it["status"] = "expired"
+            it["expired_reason"] = "no longer on the Syllabi Dates calendar"
+
+
+def _syllabus_successor(it, due, free):
+    """The free event that replaced item `it`, or None. Same course is required.
+    On the same day the title needs some overlap; on another day it must be
+    close. Among several, the same day first, then the closest title."""
+    old = _normalize_title_for_match(it.get("title"))
+    best, best_score = None, None
+    for cand in free:
+        e, course, title = cand
+        if course != it.get("course"):
+            continue
+        same_day = as_date_safe(str(e.get("start") or "")[:10]) == due
+        sim = difflib.SequenceMatcher(
+            None, old, _normalize_title_for_match(title)).ratio()
+        if sim < (SAME_DAY_MIN_SIMILARITY if same_day else RENAME_MIN_SIMILARITY):
+            continue
+        score = (same_day, sim)
+        if best_score is None or score > best_score:
+            best, best_score = cand, score
+    return best
+
+
+def _take_syllabus_event(it, e, course, title):
+    """Point item `it` at calendar event `e` (same fields the candidate reader
+    sets), so the normal syllabus refresh keeps it current from now on."""
+    raw = str(e.get("start") or "")
+    it["title"] = title
+    it["kind"] = "assessment" if _SYLLABUS_ASSESSMENT_RE.search(title) \
+        else "assignment"
+    it["date"] = raw[:10]
+    it["due_time"] = None if e.get("all_day") or "T" not in raw else raw[11:16]
+    for r in it.get("source_refs") or ():
+        if isinstance(r, dict) and r.get("source") == "gcal_syllabi":
+            r["event_id"] = str(e.get("title") or "").strip()
+
+
+def _syllabus_calendar_candidates(run, ctx):
+    """The `Syllabi Dates` calendar as candidates ("COURSE: Title" events).
+
+    Until 2026-10-07 nothing read this calendar after the first seeding, so
+    a date the user later fixed in it never reached the page: the CMSC001
+    midterm kept showing Thursday 10/8 while the calendar (and the class
+    schedule: discussion meets Wed) said Wednesday 10/7. Reading it every
+    run lets a matching item follow the calendar through step3's normal
+    authority order. Only events matching an item already tracked are
+    used: the calendar also lists "P2 Due"-style rows that Canvas names
+    differently, and adding them would duplicate those.
+    A read failure is MINOR and leaves the stored dates as they were.
+    """
+    state = ctx["state"]
+    cal_id = (state.get("calendars") or {}).get("syllabi")
+    if not cal_id:
+        run.log_error("step3-syllabi", "MINOR",
+                      "state.calendars has no 'syllabi' id -- syllabus dates "
+                      "not refreshed this run")
+        return []
+    today = ctx["today"]
+    start = datetime.combine(today - timedelta(days=1), _time.min, tzinfo=TZ)
+    end = start + timedelta(days=_SYLLABUS_WINDOW_DAYS)
+    try:
+        events = google_api.calendar_events(
+            cal_id, start.isoformat(), end.isoformat())
+    except Exception as exc:  # noqa: BLE001 -- stored dates stay as they were
+        run.log_error("step3-syllabi", "MINOR",
+                      "Syllabi Dates read failed: %s -- syllabus dates not "
+                      "refreshed this run" % exc)
+        return []
+    _follow_syllabus_calendar(
+        state, events, today - timedelta(days=1), end.date())
+    known = state.get("courses") or {}
+    tracked = {(it.get("course"), _normalize_title_for_match(it.get("title")))
+               for it in state.get("items") or ()
+               if it.get("status") in ("new", "ongoing", "unresolved",
+                                       "snoozed")}
+    out = []
+    for e in events:
+        m = _SYLLABUS_TITLE_RE.match(e.get("title") or "")
+        if not m:
+            continue
+        course = _normalize_course(m.group(1), state)
+        if course not in known:
+            continue
+        title = m.group(2)
+        if (course, _normalize_title_for_match(title)) not in tracked:
+            continue  # refreshes tracked items only; no new rows from here
+        raw = str(e.get("start") or "")
+        due_time = None if e.get("all_day") or "T" not in raw else raw[11:16]
+        out.append({
+            "thread_id": "gcal-syllabi:%s: %s" % (course, title),
+            "course": course, "title": title,
+            "kind": "assessment" if _SYLLABUS_ASSESSMENT_RE.search(title)
+            else "assignment",
+            "due_date": raw[:10], "due_time": due_time, "end_time": None,
+            "location": e.get("location") or None, "canvas_url": None,
+            "organizer": None, "description": (e.get("description") or "").strip()
+            or None, "links": [], "confidence": "confirmed",
+            "source": "gcal_syllabi"})
+    return out
+
+
+# --- STEP 4: schedule (Â§2.2 -- Class + personal calendars, today only) -----
 
 _COURSE_LINE_RE = re.compile(r"(?m)^Course:\s*(\S+)")
 
@@ -1364,11 +1713,291 @@ def _timeline_for_render(entries):
         else:
             out.append({
                 "time": e["start"].strftime("%-I:%M %p"),
+                "end_time": e["end"].strftime("%-I:%M %p") if e.get("end") else None,
                 "course_class": e["course_class"],
                 "course_label": e["course_label"],
                 "title": e["title"],
                 "location": e["location"],
             })
+    return out
+
+
+CANCEL_CHECK_KEY = "cancel_checked_announcements"
+CANCEL_ANNOUNCE_DAYS = 4
+# An instructor's new due date, kept in `kv` by key "course|title" until
+# Canvas shows the same date (then Canvas is right again and the record goes).
+DUE_OVERRIDE_KEY = "due_overrides"
+DUE_OVERRIDE_KINDS = ("assignment", "assessment")
+DUE_OPEN_STATUSES = ("new", "ongoing", "unresolved", "snoozed")
+
+
+_HOMEWORK_RE = re.compile(r"\b(?:hw|homework)\b", re.I)
+
+
+def _due_key(course, title):
+    """An announcement says "Smartbook for Chapter 13", Canvas lists "Chap 13:
+    Perfect Competition" and "HW Chap 13": a chapter number plus homework or
+    reading names the item whatever the wording."""
+    text = str(title or "")
+    m = _CHAPTER_RE.search(text)
+    if m:
+        return "%s|chapter %s %s" % (
+            course, int(m.group(1)),
+            "hw" if _HOMEWORK_RE.search(text) else "reading")
+    return "%s|%s" % (course, " ".join(text.lower().split()))
+
+
+def _find_open_coursework(items, course, title):
+    key = _due_key(course, title)
+    for it in items:
+        if it.get("kind") in DUE_OVERRIDE_KINDS and \
+                it.get("status") in DUE_OPEN_STATUSES and \
+                _due_key(it.get("course_label"), it.get("title")) == key:
+            return it
+    return None
+
+
+def _place_due(item, rec, canvas_date):
+    """Put the instructor's date on the item. The note keeps Canvas's old
+    date visible: the page never shows a silent override."""
+    item["date"] = rec["date"]
+    if rec.get("time"):
+        item["time"] = rec["time"]
+    item["notes"] = (
+        "Due date moved to %s by the instructor (Canvas announcement, posted "
+        "%s). Canvas still lists %s." % (
+            _short_date(as_date_safe(rec["date"])),
+            _short_date(as_date_safe(rec["posted"])),
+            _short_date(canvas_date) if canvas_date else "no date"))
+
+
+def _apply_due_overrides(run, ctx, items, scrape, overrides):
+    """Keep each announced due date on its item until Canvas agrees.
+
+    STEP 3 re-reads Canvas every run and writes Canvas's old date back, so
+    this runs after it, every run. A Canvas date equal to the override means
+    Canvas caught up: the record is dropped. A still-disagreeing Canvas date
+    is logged as MINOR once a day: the date is placed on every build, but the
+    disagreement is a fact about the day, and logging it per build filled the
+    errors table with one row per rebuild (2026-10-10)."""
+    today, state = ctx["today"], ctx["state"]
+    canvas = {}
+    for c in canvas_shadow.canvas_authoritative_candidates(scrape=scrape):
+        code = _normalize_course(c.get("course"), state, c.get("kind"))
+        canvas[_due_key(code, c.get("title"))] = as_date_safe(
+            c.get("due_date"))
+    for key in list(overrides):
+        rec = overrides[key]
+        rec_date = as_date_safe(rec["date"])
+        canvas_date = canvas.get(key)
+        if rec_date is None or rec_date < today - timedelta(days=7) or \
+                canvas_date == rec_date:
+            del overrides[key]
+            continue
+        it = _find_open_coursework(items, rec["course"], rec["title"])
+        if it is None:
+            continue
+        _place_due(it, rec, canvas_date)
+        if rec.get("reported_on") != today.isoformat():
+            run.log_error(
+                "step4a", "MINOR",
+                "%s %s: instructor moved it to %s; Canvas still lists %s -- "
+                "showing the announced date" % (
+                    rec["course"], rec["title"], rec["date"],
+                    canvas_date.isoformat() if canvas_date else "no date"))
+            rec["reported_on"] = today.isoformat()
+    store.kv_set(run.db_path, DUE_OVERRIDE_KEY, overrides)
+    return overrides
+
+
+def _record_due_change(overrides, label, cand, ann, sent):
+    """Store a new due date from a Canvas announcement. The caller places it
+    with `_apply_due_overrides`, which knows Canvas's date too."""
+    rec = {"course": label, "title": cand["title"].strip(),
+           "date": cand["due_date"],
+           "time": cand.get("due_time"),
+           "posted": sent.isoformat(),
+           "announcement": "ann-%s" % ann.get("id"),
+           "canvas_url": ann.get("html_url")}
+    overrides[_due_key(label, rec["title"])] = rec
+    return rec
+
+
+def _title_words(title):
+    return {w for w in re.findall(r"[a-z0-9]+", str(title or "").lower())
+            if len(w) > 2 and w not in ("the", "and", "for", "with")}
+
+
+def _same_opportunity(a, b):
+    """Two titles name one opportunity: the same words once the generic
+    ones are dropped, or one title's words nearly all inside the other's."""
+    wa, wb = _title_words(a), _title_words(b)
+    if not wa or not wb:
+        return False
+    common = len(wa & wb)
+    return common == min(len(wa), len(wb)) and common >= 2 or \
+        common / max(len(wa), len(wb)) >= 0.75
+
+
+def _apply_application_news(run, ctx, items, candidates):
+    """A decision email ("you have been selected") moves the tracked
+    application it names to that stage, dated from the email. Mail that names
+    no tracked application is logged, never guessed at."""
+    news = [c for c in candidates if c.get("application_status")]
+    if not news:
+        return 0
+    records = store.applications_all(run.db_path)
+    moved = 0
+    conn = dbmod.connect(run.db_path)
+    try:
+        for c in news:
+            for it in items:
+                rec = records.get(it.get("id"))
+                if not rec or not _same_opportunity(it.get("title"),
+                                                    c.get("title")):
+                    continue
+                after = applications.from_news(
+                    rec, c["application_status"], c.get("sent_date"))
+                if after is None:
+                    continue
+                store.application_put(conn, it["id"], after)
+                records[it["id"]] = after
+                moved += 1
+                run.log_error(
+                    "applications", "MINOR",
+                    "%s: email (%s) set stage to %s" % (
+                        it.get("title"), c.get("sent_date"),
+                        applications.LABELS[after["stage"]]))
+                break
+            else:
+                run.log_error(
+                    "applications", "MINOR",
+                    "%s: decision email (%s) names no tracked application "
+                    "-- not applied" % (c.get("title"), c["application_status"]))
+        conn.commit()
+    finally:
+        conn.close()
+    return moved
+
+
+def step4a_canvas_cancellations(run, ctx, items):
+    """Canvas announcements ("No in-person class today or Weds") never reach
+    the Gmail sweep, so read each recent one once for a cancellation or a
+    moved due date. Each canceled meeting becomes an event item flagged
+    `cancellation`; STEP 4b marks it on the calendar. A moved due date is
+    kept as an override (`_apply_due_overrides`). Checked announcement ids
+    live in `kv`."""
+    today, state = ctx["today"], ctx["state"]
+    scrape = _load_canvas_scrape(run)
+    stored = store.kv_get(run.db_path, DUE_OVERRIDE_KEY) or {}
+    # Daily-log trace: a MINOR per build means the stored reported_on was lost.
+    print("step4a due overrides read: %s" % json.dumps(
+        {k: r.get("reported_on") for k, r in stored.items()}), file=sys.stderr)
+    overrides = _apply_due_overrides(run, ctx, items, scrape, stored)
+    labels = _canvas_code_to_label(scrape, state)
+    checked = set(store.kv_get(run.db_path, CANCEL_CHECK_KEY) or [])
+    cutoff = today - timedelta(days=CANCEL_ANNOUNCE_DAYS)
+    bodies, meta = [], {}
+    for bundle in (scrape or {}).get("courses", []):
+        label = labels.get(bundle["course"].get("course_code") or "")
+        if not label:
+            continue
+        for a in bundle.get("announcements", []):
+            aid, posted = "ann-%s" % a.get("id"), a.get("posted_at")
+            sent = relative_dates.as_day(_et_date_iso(posted))
+            if aid in checked or not sent or sent < cutoff:
+                continue
+            title = a.get("title") or ""
+            bodies.append({
+                "id": aid,
+                "headers": {"Subject": "%s: %s" % (label, title),
+                            "From": label + " (Canvas announcement)",
+                            "Date": datetime.fromisoformat(
+                                str(posted).replace("Z", "+00:00")
+                            ).astimezone(TZ).strftime(
+                                "%a, %d %b %Y %H:%M:%S %z")},
+                "messages": [digest.plain(a.get("message_html"))]})
+            meta[aid] = (label, a, sent)
+    if not bodies:
+        return 0
+    by_thread = {}
+    for i in range(0, len(bodies), 8):
+        by_thread.update(_extract_batch(run, ctx, bodies[i:i + 8]))
+    existing = {it.get("id") for it in items}
+    made = 0
+    new_dues = []
+    for aid, cands in by_thread.items():
+        if aid not in meta:
+            continue
+        label, ann, sent = meta[aid]
+        for c in cands:
+            c["course"] = _normalize_course(c.get("course"), state, "event")
+            _coerce_candidate(run, c)
+            if c.get("due_change") and c.get("due_date") and c.get("title"):
+                new_dues.append(_record_due_change(
+                    overrides, label, c, ann, sent))
+                continue
+            if not (c.get("cancellation") and c.get("due_date")
+                    and c.get("title")):
+                continue
+            iid = "cancel-%s-%s-%s" % (
+                _slugify(label), c["due_date"], _slugify(c["title"]))[:120]
+            if iid in existing:
+                continue
+            existing.add(iid)
+            items.append({
+                "id": iid, "course": label,
+                "course_class": COURSE_LABEL_TO_CLASS.get(label, "none"),
+                "course_label": label, "kind": "event",
+                "title": c["title"],
+                "detail": "Canceled: %s" % (ann.get("title") or "").strip(),
+                "date": c["due_date"], "time": c.get("due_time"),
+                "canvas_url": ann.get("html_url"), "confidence": "confirmed",
+                "evidence": "include", "regime": "confirmed",
+                "status": "new", "times_surfaced": 0,
+                "source_refs": [{"source": "canvas_scraper",
+                                 "thread_id": "canvas-announcement:%s" % aid}],
+                "first_seen": today.isoformat(),
+                "text_anchor": sent.isoformat(), "cancellation": True})
+            made += 1
+    # Only a fully read announcement is "checked"; a failed batch raised
+    # above and is retried next run.
+    store.kv_set(run.db_path, CANCEL_CHECK_KEY,
+                 sorted(checked | set(meta))[-300:])
+    if new_dues:
+        overrides = _apply_due_overrides(run, ctx, items, scrape, overrides)
+        for rec in new_dues:
+            if _find_open_coursework(items, rec["course"], rec["title"]) \
+                    is None:
+                run.log_error(
+                    "step4a", "MINOR",
+                    "%s %s: announcement moves it to %s, but no open item "
+                    "matches -- kept for when it appears" % (
+                        rec["course"], rec["title"], rec["date"]))
+    return made
+
+
+class _CalendarWriteApi:
+    """The four calls `cancellations.apply` needs, bound to google_api."""
+    write_ok = staticmethod(google_api.calendar_write_ok)
+    event_refs = staticmethod(google_api.calendar_event_refs)
+    mark = staticmethod(google_api.mark_event_canceled)
+
+
+def step4b_cancellations(run, ctx, items):
+    """Rule: a notification that a class/event is canceled marks it CANCELED
+    on the calendar (never deletes) and in the DB. Runs before STEP 4 so
+    today's timeline already treats the meeting as free."""
+    state = ctx["state"]
+    out = cancellations.apply(
+        items, ctx["today"], TZ, state.get("calendars"),
+        lambda e: _course_from_class_event(e, state)[1], _CalendarWriteApi,
+        lambda msg: run.log_error("step4b", "MINOR", msg))
+    if out["pending"] and not google_api.calendar_write_ok():
+        run.log_error(
+            "step4b", "MAJOR",
+            "%d canceled class(es) not yet marked on the calendar: no "
+            "calendar-write token. Run `remote-auth` menu 7." % out["pending"])
     return out
 
 
@@ -1395,9 +2024,9 @@ def step4_schedule(run, ctx):
 
     try:
         class_events = google_api.calendar_events(
-            class_id, day_start, day_end, root=ROOT)
+            class_id, day_start, day_end)
         personal_events = google_api.calendar_events(
-            personal_id, day_start, day_end, root=ROOT)
+            personal_id, day_start, day_end)
     except google_api.AuthError as exc:
         run.log_error("step4", "MAJOR", "Calendar read failed: %s" % exc)
         return empty
@@ -1414,11 +2043,38 @@ def step4_schedule(run, ctx):
         busy.append({**e, "course_class": "personal",
                      "course_label": "Personal"})
 
+    # A canceled meeting stays on the page, marked, but is free time: it is
+    # left out of the gap math, the tight-transition alert and busy blocks.
+    live = [e for e in busy if not cancellations.is_marked(e.get("title"))]
+    canceled = [e for e in busy if cancellations.is_marked(e.get("title"))]
     return {
-        "timeline": _timeline_for_render(schedule.timeline(busy)),
-        "tight_alert": schedule.tight_transition_alert(busy),
-        "busy_blocks": busy,
+        "timeline": _with_canceled(
+            _timeline_for_render(schedule.timeline(live)), canceled),
+        "tight_alert": schedule.tight_transition_alert(live),
+        "busy_blocks": live,
     }
+
+
+def _with_canceled(rows, canceled):
+    """Slot canceled meetings into the rendered timeline by start time."""
+    for e in sorted(canceled, key=lambda e: str(e.get("start"))):
+        start, end = schedule._dt(e.get("start")), schedule._dt(e.get("end"))
+        if not start or e.get("all_day"):
+            continue
+        row = {"time": start.strftime("%-I:%M %p"),
+               "end_time": end.strftime("%-I:%M %p") if end else None,
+               "course_class": e["course_class"],
+               "course_label": e["course_label"],
+               "title": e.get("title") or "",
+               "location": e.get("location") or "", "canceled": True}
+        pos = len(rows)
+        for i, r in enumerate(rows):
+            if "gap" not in r and datetime.strptime(
+                    r["time"], "%I:%M %p").time() > start.time():
+                pos = i
+                break
+        rows.insert(pos, row)
+    return rows
 
 
 # --- STEP 5: umbrella check (Open-Meteo, no credential needed) ------------
@@ -1557,11 +2213,12 @@ def step5d_grades(run, ctx, items, llm_enabled=False):
                 "INSERT INTO course_grade_snapshots "
                 "(captured_at, course_label, current_score, current_grade, "
                 " final_score, final_grade, graded_count, gradable_count, "
-                " missing_count, source) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                " missing_count, source, graded_items) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (row["captured_at"], row["course_label"], row["current_score"],
                  row["current_grade"], row["final_score"], row["final_grade"],
                  row["graded_count"], row["gradable_count"],
-                 row["missing_count"], row["source"]))
+                 row["missing_count"], row["source"], row["graded_items"]))
         conn.commit()
 
         course_text, insight_items, notes = {}, [], []
@@ -1667,6 +2324,52 @@ def step5b_campus(run, ctx, timeline_info):
     return got
 
 
+# --- STEP 5g: Handshake (2026-09-29) -----------------------------------------
+
+# The scraper runs on its own interval (sources.py); older than two days
+# means it has been failing.
+HANDSHAKE_STALE_HOURS = 48
+
+
+def step5g_handshake(run, ctx):
+    """handshake-scraper's latest output -> job leads and campus event
+    items (handshake.py). Reads a local file, like canvas-scraper's; still
+    --live only, matching how every source enters the pipeline."""
+    if run.dry_run:
+        run.skipped.append("step5g: dry-run, Handshake scrape not read")
+        return []
+    return _handshake_items(run, ctx)
+
+
+def _handshake_items(run, ctx):
+    state, today = ctx["state"], ctx["today"]
+    try:
+        scrape = handshake.load()
+    except handshake.NoHandshakeScrapeError as exc:
+        run.log_error("step5g", "MINOR", "%s -- no Handshake items this run"
+                      % exc)
+        return []
+    age = handshake.age_hours(scrape, datetime.now(timezone.utc))
+    if age is not None and age > HANDSHAKE_STALE_HOURS:
+        run.log_error("step5g", "MAJOR", "Handshake data is %.1f days old; "
+                      "run `canvas login` if its scrape keeps failing (see "
+                      "Sources)" % (age / 24.0))
+    for err in scrape.get("errors") or ():
+        run.log_error("step5g", "MINOR", "Handshake scrape: %s" % err)
+    goals = [(r["id"], r.get("keywords") or ())
+             for r in (state.get("requirements") or {}).get("entries") or ()
+             if r.get("active", True)]
+    answers = campus.with_default_boosts(
+        (state.get("preferences") or {}).get("quiz") or {},
+        list(state.get("courses") or {}))["answers"]
+    got = handshake.job_leads(scrape, today, goals) + handshake.event_items(
+        scrape, today, answers.get("keywords_boost") or (),
+        blocked=answers.get("keywords_block") or ())
+    for it in got:
+        it["first_seen"] = today.isoformat()
+    return got
+
+
 # --- STEP 5e: what changed on Canvas (brief v2) ------------------------------
 
 def _canvas_code_to_label(scrape, state):
@@ -1712,6 +2415,10 @@ def step5e_changes(run, ctx, items, llm_enabled=False):
         it = by_id.get(iid)
         if not it or it.get("status") not in ("new", "ongoing", "unresolved"):
             continue
+        # A later step that re-owned the item (a generator's fresh copy)
+        # drops date_changed_on; its date is then not the one STEP 3 moved.
+        if it.get("date_changed_on") != today.isoformat():
+            continue
         d = as_date_safe(it.get("date"))
         label = it.get("course_label") or "UMD"
         g = next((g for g in groups if g["course"] == label), None)
@@ -1720,6 +2427,7 @@ def step5e_changes(run, ctx, items, llm_enabled=False):
             groups.append(g)
         g["entries"].insert(0, {
             "label": "Moved", "url": it.get("canvas_url") or "",
+            "own_move": True,
             "text": "%s · now %s" % (it.get("title"), _short_date(d) if d
                                      else "undated")})
 
@@ -1731,6 +2439,15 @@ def step5e_changes(run, ctx, items, llm_enabled=False):
     digest.summarize_announcements(
         groups, run.db_path, _llm if llm_enabled else None,
         lambda msg: run.log_error("step5e", "MINOR", msg))
+    # An announcement is worded for the day it was posted ("review is
+    # tomorrow"); say it for today. Cached summaries stay as written.
+    for g in groups:
+        for e in g["entries"]:
+            posted = _et_date_iso(e.get("posted"))
+            if e.get("label") == "Announcement" and posted:
+                day = relative_dates.as_day(posted)
+                for k in ("text", "summary"):
+                    e[k] = relative_dates.retime(e.get(k), day, today)
     base["until"] = until
     run.digest_baseline = base
     return groups
@@ -1762,7 +2479,7 @@ def step5f_research(run, ctx, items, llm_enabled=False):
         if not tid:
             return ""
         try:
-            return thread_prompt_text(google_api.thread_bodies(tid, root=ROOT))
+            return thread_prompt_text(google_api.thread_bodies(tid))
         except Exception as exc:  # noqa: BLE001
             run.log_error("step5f", "MINOR", "could not re-read the email for "
                           "%r: %s" % (item.get("title"), exc))
@@ -1935,7 +2652,9 @@ def _search_lead_item(cand, extra, today):
         if extra.get("cost_to_check") in opportunity.COST_POINTS else "low"
     prerequisites = [p for p in (extra.get("prerequisites") or ())
                      if p in opportunity.PREP_LEAD_DAYS]
-    deadline = extra.get("deadline") or None
+    # The model sometimes writes prose ("Early February"); only an ISO date
+    # may reach opportunity.lead()/compute_act_by().
+    deadline = coerce_date(extra["deadline"]) if extra.get("deadline") else None
     act_by = None
     if deadline and prerequisites:
         try:
@@ -1963,6 +2682,12 @@ def _search_lead_item(cand, extra, today):
     item["score"] = opportunity.expected_value(
         value_if_won=value_if_won, cost_to_check=cost_to_check,
         signals=signals, requirement_hits=len(L["requirement_ids"]))
+    # What _promote_confirmed_leads() needs if he confirms it: the page and
+    # its stated deadline (`date` holds act_by when there is one).
+    item["opportunity"] = {"apply_url": cand["url"],
+                           "deadline": coerce_date(deadline) if deadline else None}
+    if stated:
+        item["opportunity"]["eligibility"] = stated
     return item
 
 
@@ -2025,6 +2750,12 @@ def _recurrence_lead_item(recur, ledger_rows, today):
     return item
 
 
+# A program's page changes on the scale of weeks. Each goal keyword is
+# searched at most this often; collect.plan()'s per-run cap rotates through
+# the rest.
+DISCOVERY_REFRESH_DAYS = 7
+
+
 def step5c_discovery(run, ctx, institution="University of Maryland"):
     """DISCOVERY.md §13-14. Skipped entirely in dry-run (no network/LLM
     call is made at all, matching every other --live-gated step).
@@ -2068,9 +2799,16 @@ def step5c_discovery(run, ctx, institution="University of Maryland"):
         run.skipped.append("step5c: not needed -- no active requirements "
                            "for the search half of discovery to task")
     else:
-        plan = collect.plan(active, ctx["today"], institution=institution)
+        searched = store.kv_get(run.db_path, "discovery_searched") or {}
+        recent = {q for q, on in searched.items()
+                  if (as_date_safe(on) or _date.min)
+                  > ctx["today"] - timedelta(days=DISCOVERY_REFRESH_DAYS)}
+        plan = collect.plan(active, ctx["today"], institution=institution,
+                            skip=recent)
         if not plan["queries"]:
-            pass
+            run.skipped.append("step5c: not needed -- every goal keyword "
+                               "was searched in the last %d days"
+                               % DISCOVERY_REFRESH_DAYS)
         else:
             prompt = "Run these queries and report results per the " \
                 "schema:\n\n" + "\n".join(
@@ -2081,7 +2819,7 @@ def step5c_discovery(run, ctx, institution="University of Maryland"):
                     prompt, system_prompt=_DISCOVERY_SYSTEM_PROMPT,
                     tools="WebSearch,WebFetch",
                     json_schema=_DISCOVERY_RESULT_SCHEMA,
-                    model="sonnet", timeout=300)
+                    model="haiku", timeout=300)
             except llm_cli.ClaudeCliError as exc:
                 run.log_error("step5c", "MAJOR",
                               "discovery call failed: %s -- discovery ran "
@@ -2089,6 +2827,12 @@ def step5c_discovery(run, ctx, institution="University of Maryland"):
                 result = None
 
             if result is not None:
+                searched.update({q["query"]: ctx["today"].isoformat()
+                                 for q in plan["queries"]})
+                store.kv_set(run.db_path, "discovery_searched", {
+                    q: on for q, on in searched.items()
+                    if (as_date_safe(on) or _date.min)
+                    > ctx["today"] - timedelta(days=90)})
                 # UMD is the only owning domain this project has any
                 # standing basis for; a real requirement naming a specific
                 # funder/company should extend this per-requirement, which
@@ -2123,6 +2867,178 @@ def step5c_discovery(run, ctx, institution="University of Maryland"):
 
     ranked = opportunity.rank(leads, key="score")
     return ranked[:opportunity.LEAD_MAX_SURFACES]
+
+# --- STEP 5w: things to watch (the user's own list, checked daily) ---------
+
+WATCH_CHECK_KEY = "watch_checked"
+
+
+def _judge_in_shared_browser(run, todo):
+    """Read each due watch's stored product pages in the shared browser and
+    judge them from that text (no web tools). Returns (results, notes): notes
+    maps watch id -> the reasons its pages could not settle it. A browser that
+    is not reachable leaves the search-only verdicts standing."""
+    notes = {w["id"]: [] for w in todo}
+    urls = sorted({f["url"] for w in todo for f in w["found"]})
+    if not urls:
+        return [], notes
+    try:
+        pages = shared_browser.read_pages(urls)
+    except shared_browser.BrowserUnavailable as exc:
+        for w in todo:
+            if w["found"]:
+                notes[w["id"]].append("shared browser not reachable, judged "
+                                      "from search only: %s" % exc)
+        return [], notes
+    blocks = []
+    for w in todo:
+        got = []
+        for f in w["found"]:
+            p = pages.get(f["url"], {"error": "no answer from the browser"})
+            notes[w["id"]].extend(watches.page_notes(f["url"], p))
+            if "text" in p:
+                got.append((f["url"], p["text"]))
+        if got:
+            blocks.append((w, got))
+    if not blocks:
+        return [], notes
+    try:
+        judged, _env = llm_cli.call(
+            watches.judge_prompt(blocks), system_prompt=watches.JUDGE_SYSTEM_PROMPT,
+            json_schema=watches.RESULT_SCHEMA, model="haiku", timeout=300,
+            label="step5w-judge")
+    except llm_cli.ClaudeCliError as exc:
+        for w, _got in blocks:
+            notes[w["id"]].append("browser judge failed, judged from search "
+                                  "only: %s" % str(exc)[:120])
+        return [], notes
+    for r in judged.get("results", []):
+        print("step5w judged [%s] item=%s met=%s finding=%s url=%s" % (
+            r.get("id"), json.dumps(r.get("item") or ""), r.get("met"),
+            json.dumps(r.get("finding")), json.dumps(r.get("url"))),
+            file=sys.stderr)
+    return judged.get("results", []), notes
+
+
+def step5w_watches(run, ctx):
+    """Brief preferences -> "Things to watch" (watches.py). Each active watch
+    is checked at most once a day, in one search call; confirmed hits are
+    written to store.watch_hits (the "Things watching" section), not to the
+    opportunities. Live only: a dry run makes no web call."""
+    doc = store.kv_get(run.db_path, watches.STORE_KEY) or {}
+    try:
+        entries = watches.clean_entries(doc.get("entries") or [])
+    except ValueError as exc:
+        run.log_error("step5w", "MINOR", "watch list not read: %s" % exc)
+        return []
+    if run.dry_run:
+        run.skipped.append("step5w: dry-run, %d watch(es) not checked"
+                           % len(entries))
+        return []
+    if not entries:
+        store.watch_hits_save(run.db_path, [], set(), set())
+        run.skipped.append("step5w: not needed -- no things to watch set")
+        return []
+    checked = store.kv_get(run.db_path, WATCH_CHECK_KEY) or {}
+    todo = watches.due(entries, checked, ctx["today"])
+    live = {w["id"] for w in entries if w.get("active")}
+    if not todo:
+        store.watch_hits_save(run.db_path, [], set(), live)
+        run.skipped.append("step5w: not needed -- every watch was checked "
+                           "today (next check: tomorrow's build)")
+        return []
+
+    def save(notes_by_id):
+        # The record on each watch shows on the page: the last check's date
+        # and every reason it could not settle the watch.
+        for w in todo:
+            w["status"] = watches.status(ctx["today"], notes_by_id.get(w["id"], []))
+        store.kv_set(run.db_path, watches.STORE_KEY, {
+            "version": doc.get("version", 1), "entries": entries,
+            "updated_at": doc.get("updated_at")})
+
+    try:
+        result, _env = llm_cli.call_with_tools(
+            watches.prompt(todo), system_prompt=watches.SYSTEM_PROMPT,
+            tools="WebSearch,WebFetch", json_schema=watches.RESULT_SCHEMA,
+            model="haiku", timeout=300, label="step5w")
+    except llm_cli.ClaudeCliError as exc:
+        # Not marked checked: the next build tries again. The page says so.
+        run.log_error("step5w", "MAJOR", "watch check failed: %s -- watches "
+                      "were not checked this run" % exc)
+        save({w["id"]: ["watch check failed today, retried on the next "
+                        "build: %s" % str(exc)[:120]] for w in todo})
+        store.watch_hits_save(run.db_path, [], set(), live)
+        return None
+    for note in result.get("failures", []):
+        run.log_error("step5w", "MINOR", "watch not checked: %s" % note)
+    by_id = {w["id"]: w for w in todo}
+    notes = {w["id"]: [] for w in todo}
+    answered = set()
+    # Daily-log trace: what each watch was told and sent, so a missed hit
+    # shows whether the model read the pages or said "not met" on a guess.
+    for r in result.get("results", []):
+        w = by_id.get(r.get("id"))
+        print("step5w result [%s] item=%s met=%s seen_on=%s sites=%s pages=%s "
+              "finding=%s url=%s" % (
+            r.get("id"), json.dumps(r.get("item") or ""), r.get("met"),
+            r.get("seen_on") or "page",
+            json.dumps(w.get("urls", []) if w else []),
+            json.dumps(r.get("pages") or []),
+            json.dumps(r.get("finding")), json.dumps(r.get("url"))),
+            file=sys.stderr)
+        if w is None:
+            continue
+        answered.add(w["id"])
+        # Product pages the check found are kept on the watch, so the next
+        # check goes straight to them.
+        w["found"] = watches._found(w["found"] + [
+            p for p in (r.get("pages") or []) if isinstance(p, dict)])
+    for w in todo:
+        if w["id"] not in answered:
+            notes[w["id"]].append("no answer from the search for this watch: "
+                                  "see the daily log")
+        if not w["found"]:
+            notes[w["id"]].append(
+                "no product page found on the sites: check the sites, or add "
+                "the product page to check" if w["urls"] else
+                "no product page yet: add a page to check")
+    # Stored product pages are read in the shared logged-in browser, where
+    # member prices show, and judged from that text. Its verdict replaces the
+    # search-only verdict for the same item.
+    judged, page_notes = _judge_in_shared_browser(run, todo)
+    for wid, found in page_notes.items():
+        notes[wid].extend(found)
+    if judged:
+        keys = {(r.get("id"), (r.get("item") or "").lower()) for r in judged}
+        result["results"] = judged + [
+            r for r in result.get("results", [])
+            if (r.get("id"), (r.get("item") or "").lower()) not in keys]
+    hits = []
+    for r in result.get("results", []):
+        w = by_id.get(r.get("id"))
+        if w is not None and r.get("met"):
+            hits.append(watches.hit(w, r.get("finding"), r.get("url"),
+                                    ctx["today"], name=r.get("item") or "",
+                                    seen_on=r.get("seen_on") or "page"))
+    # An out-of-stock page is no reason to alarm when the same watch hit.
+    hit_ids = {h["watch_id"] for h in hits}
+    for wid in hit_ids:
+        notes[wid] = [n for n in notes[wid] if not n.startswith("out of stock")]
+    for w in todo:
+        for n in notes[w["id"]]:
+            run.log_error("step5w", "MINOR", "[%s] %s" % (w["id"], n))
+    save(notes)
+    store.watch_hits_save(run.db_path, hits, {w["id"] for w in todo}, live)
+    # Every watch sent counts as checked today, reported or not, so an
+    # omitted one does not cost a fresh search on every rebuild.
+    for w in todo:
+        checked[w["id"]] = ctx["today"].isoformat()
+    live_ids = {w["id"] for w in entries}
+    store.kv_set(run.db_path, WATCH_CHECK_KEY,
+                 {k: v for k, v in checked.items() if k in live_ids})
+    return None
+
 
 # --- Merging generated items (leads, grade insights) into state ------------
 
@@ -2191,13 +3107,79 @@ def _merge_generated(items, generated):
     return items
 
 
+def _attach_applications(run, items, today=None):
+    """Each tracked item carries its applications.py record as
+    `application` for this run (lifecycle keeps active ones on the page).
+    In memory only: the page owns the table, and `application` is not an
+    ITEM_EXTRA_FIELDS key, so the run never writes it back."""
+    try:
+        records = store.applications_all(run.db_path)
+    except Exception as exc:  # noqa: BLE001 -- the page still renders
+        run.log_error("step6", "MAJOR", "application tracker not read: %s"
+                      % exc)
+        return
+    have = {it.get("id") for it in items}
+    for item_id, rec in records.items():
+        # Added by hand on the page: becomes an ordinary opportunity item
+        # the first run after, and is saved with the rest from then on.
+        if rec.get("manual") and item_id not in have:
+            items.append(applications.manual_item(
+                item_id, rec["manual"], today or _date.today()))
+            run.log_error("step6", "INFO", "%s added from the page" % item_id)
+    for it in items:
+        rec = records.get(it.get("id"))
+        if rec:
+            it["application"] = rec
+        else:
+            it.pop("application", None)
+
+
+def _promote_confirmed_leads(run, items, today):
+    """"Confirmed -- it's real" on a lead makes it an opportunity: it gets
+    researched, tracked and drafted like one that arrived by email. The
+    lead itself stays `confirmed` (its ledger history is unchanged)."""
+    have = {it.get("id") for it in items}
+    for lead_item in [it for it in items if it.get("regime") == "lead"
+                      and it.get("status") == "confirmed"]:
+        new_id = "opp-%s" % lead_item["id"]
+        if new_id in have:
+            continue
+        facts = dict(lead_item.get("opportunity") or {})
+        url = facts.get("apply_url") or lead_item.get("source_url") or ""
+        deadline = facts.pop("deadline", None)
+        facts.setdefault("type", "other")
+        if url.startswith("https://"):
+            facts["apply_url"] = url
+        items.append({
+            "id": new_id, "course": None, "course_class": "umd",
+            "course_label": "UMD", "kind": "opportunity",
+            "title": re.sub(r" may reopen around .*$", "",
+                            lead_item.get("title") or ""),
+            "date": deadline, "act_by": lead_item.get("act_by"),
+            "source_url": url if url.startswith("https://") else "",
+            "links": [l for l in lead_item.get("links") or ()
+                      if str(l.get("url", "")).startswith("https://")],
+            "confidence": "inferred", "evidence": "include",
+            "regime": "confirmed", "status": "new", "times_surfaced": 0,
+            "requirement_ids": list(lead_item.get("requirement_ids") or ()),
+            "source_refs": [{"source": "lead", "id": lead_item["id"]}],
+            "first_seen": today.isoformat(), "opportunity": facts,
+        })
+        have.add(new_id)
+        run.log_error("step6", "INFO", "%s confirmed: now opportunity %s"
+                      % (lead_item["id"], new_id))
+
+
 def _retire_homepage_leads(run, items):
     """A lead whose source is a site's front page is not a specific thing
     to act on (the discovery prompt has said so since 2026-09-19, but leads
-    minted before that kept surfacing)."""
+    minted before that kept surfacing). A lead that carries a deadline is
+    a specific opportunity whose owner simply has no deeper page to link
+    (A federal scholarship's whole site is its front page), so it is kept."""
     from urllib.parse import urlsplit
     for it in items:
-        if it.get("regime") != "lead" or it.get("status") in _LEAD_DONE:
+        if it.get("regime") != "lead" or it.get("status") in _LEAD_DONE \
+                or it.get("act_by"):
             continue
         try:
             path = urlsplit(str(it.get("source_url") or "")).path
@@ -2208,6 +3190,270 @@ def _retire_homepage_leads(run, items):
             it["expired_reason"] = "a homepage, not a specific opportunity"
             run.log_error("step6", "INFO", "%s retired: homepage lead"
                           % it.get("id"))
+
+
+def _event_place_key(it):
+    return " ".join(re.sub(r"[^a-z0-9 ]+", " ",
+                           str(it.get("location") or "").lower()).split())
+
+
+def _retire_campus_duplicates(run, items):
+    """A campus calendar event that an email already put on the page (same
+    day, same venue) is the same event twice under two titles -- "Maryland
+    Football vs UCLA" beside "Maryland vs UCLA Football Game". The email
+    copy stays (it carries the ticket link); the campus copy lends it any
+    links it lacks and is expired with a reason, not deleted."""
+    open_ = ("new", "ongoing", "unresolved")
+    others = {}
+    for it in items:
+        if it.get("kind") == "event" and it.get("status") in open_ \
+                and not str(it.get("id", "")).startswith("campus-") \
+                and it.get("date") and _event_place_key(it):
+            others.setdefault((it["date"], _event_place_key(it)), it)
+    dropped = []
+    for it in items:
+        if not str(it.get("id", "")).startswith("campus-") \
+                or it.get("status") not in open_:
+            continue
+        twin = others.get((it.get("date"), _event_place_key(it)))
+        if twin is None:
+            continue
+        have = {l.get("url") for l in twin.get("links") or ()}
+        extra = [l for l in it.get("links") or () if l.get("url") not in have]
+        if extra:
+            twin["links"] = list(twin.get("links") or ()) + extra
+        it["status"] = "expired"
+        it["expired_reason"] = "duplicate of %s" % twin.get("id")
+        dropped.append(it.get("id"))
+    if dropped:
+        run.log_error("step6", "INFO",
+                      "%d campus event(s) retired as duplicates of an "
+                      "emailed event on the same day and venue" % len(dropped))
+    return dropped
+
+
+_OPEN_ST = ("new", "ongoing", "unresolved", "snoozed", "open")
+_USER_CLOSED = ("dismissed", "handled")
+_DELIVERABLE_RE = re.compile(
+    r"\b(project|homework|hw|lab|assignment|problem set|pset|paper|essay)"
+    r"\s*#?\s*0*(\d+)\b", re.I)
+_TITLE_NOISE = {
+    "the", "a", "an", "of", "and", "at", "in", "on", "for", "to", "with",
+    "fall", "spring", "summer", "winter", "annual", "event", "night"}
+
+
+def _event_title_tokens(title):
+    """Step 6's own tokenizer (not `_title_tokens` below, which the page's
+    near-duplicate check uses): drops filler words and years."""
+    words = re.findall(r"[a-z0-9]+", str(title or "").lower())
+    return frozenset(w for w in words if w not in _TITLE_NOISE
+                     and not re.fullmatch(r"20\d\d", w))
+
+
+def _same_deliverable_key(item):
+    """("deliverable", "CMSC001", "project-1", date) for "Coding Project 1
+    due" and "Project #1: Drawing App" alike: the syllabus calendar and
+    Canvas name one project two ways. Same course and day are required, and
+    a title naming several numbered things has no key."""
+    if item.get("kind") not in ("assignment", "assessment") \
+            or not item.get("date") or not item.get("course"):
+        return None
+    found = {(("homework" if m.group(1).lower() == "hw" else
+               "pset" if m.group(1).lower() == "problem set" else
+               m.group(1).lower()), m.group(2))
+             for m in _DELIVERABLE_RE.finditer(str(item.get("title") or ""))}
+    if len(found) != 1:
+        return None
+    noun, num = found.pop()
+    return ("deliverable", item["course"], "%s-%s" % (noun, num),
+            item["date"])
+
+
+_HW_RE = re.compile(r"\b(homework|hw)\b", re.I)
+# How far Canvas may move a week's homework off the syllabus day and still
+# stand for it (_near_duplicates).
+WEEKLY_HW_SLACK_DAYS = 3
+
+
+def _weekly_homework_key(item):
+    """("weekly-hw", "ECON001", date) for a course's homework due that day,
+    numbered ("HW Chap 06") or not ("Weekly Homework (Chapter HW)"). The
+    syllabus calendar carries one unnumbered placeholder per week while
+    Canvas carries the numbered homeworks it stands for; neither names the
+    other, so `_same_deliverable_key` cannot pair them."""
+    if item.get("kind") != "assignment" or not item.get("date") \
+            or not item.get("course") \
+            or not _HW_RE.search(str(item.get("title") or "")):
+        return None
+    return ("weekly-hw", item["course"], item["date"])
+
+
+def _same_event(a, b):
+    """Titles that restate each other: equal after dropping filler and
+    years, or one contained in the other (3+ words)."""
+    ta, tb = _event_title_tokens(a.get("title")), _event_title_tokens(b.get("title"))
+    if not ta or not tb:
+        return False
+    small, big = sorted((ta, tb), key=len)
+    return small == big or (len(small) >= 3 and small <= big)
+
+
+# Words too common in event titles to tie two of them together on their own.
+_GENERIC_EVENT_WORDS = {
+    "deadline", "process", "request", "requests", "change", "changes",
+    "session", "meeting", "workshop", "program", "application", "opens",
+    "closes", "information", "registration", "students", "student"}
+
+
+def _same_listing(a, b):
+    """Differently worded announcements of one thing (2026-10-13: three
+    Resident Life emails gave "Fall Reassignment Request Deadline", "Fall
+    Room Reassignment Process" and "Fall Reassignment Request (room
+    change)", all 12:00 on 10/21). Neither title contains the other, so
+    `_same_event` keeps them apart. They are one listing when they also
+    share the clock time, a link and a distinctive word. Two different
+    talks at one hour rarely share both a link and a topic word."""
+    ta, tb = coerce_time(a.get("time")), coerce_time(b.get("time"))
+    if not ta or ta != tb:
+        return False
+    urls = lambda it: {l.get("url") for l in it.get("links") or ()
+                       if l.get("url")}
+    if not urls(a) & urls(b):
+        return False
+    shared = _event_title_tokens(a.get("title")) \
+        & _event_title_tokens(b.get("title"))
+    return any(len(w) >= 6 and w not in _GENERIC_EVENT_WORDS for w in shared)
+
+
+def _canvas_exams_are_assessments(run, items):
+    """Canvas files an in-class midterm as an assignment with nothing to
+    submit ("Midterm 1", submission_types ["none"], due 11:59 PM). Typed
+    that way it lost an exam's weight, its "Take it" tag and the
+    masthead's exam countdown (2026-10-02: ECON001 Midterm 1 on Tue 10/6
+    was left out of the TLDR while CMSC001's later midterm led it). An
+    exam-titled Canvas entry with an in-person submission type is an
+    assessment. Its 11:59 PM is Canvas's end-of-day default, not when the
+    exam sits, so it is dropped; reconcile writes it back every run, so
+    this runs every run too."""
+    promoted = []
+    for it in items:
+        types = it.get("submission_types")
+        if it.get("kind") not in ("assignment", "assessment") or not types \
+                or not set(types) <= lifecycle._IN_PERSON_SUBMISSION_TYPES \
+                or not _exam_key(it.get("title")):
+            continue
+        if it["kind"] == "assignment":
+            it["kind"] = "assessment"
+            promoted.append(it.get("id"))
+        if it.get("time") == "23:59":
+            it["time"] = None
+    if promoted:
+        run.log_error("step6", "INFO", "%d Canvas exam(s) typed as "
+                      "assessments: %s" % (len(promoted), ", ".join(promoted)))
+    return promoted
+
+
+def _keeper_rank(item):
+    return (bool(item.get("canvas_url")), _item_authority(item),
+            bool(item.get("location")), bool(item.get("time")),
+            len(item.get("source_refs") or ()),
+            len(str(item.get("description") or "")))
+
+
+def _retire_same_thing_duplicates(run, items):
+    """One thing, one row. Sources name the same real thing differently
+    (syllabus "Coding Project 1 due" vs Canvas "Project #1: Drawing App";
+    three emails plus the campus calendar for one career fair), and each
+    sighting becomes an item. Items on one day that are the same numbered
+    deliverable of one course, or events whose titles restate each other,
+    collapse into the best-evidenced one. The rest are expired with a
+    reason, lending the keeper their sources and any facts it lacks. A
+    twin the user already dismissed or handled closes the keeper too."""
+    groups = []
+    live = [it for it in items
+            if it.get("status") in _OPEN_ST + _USER_CLOSED]
+    by_key = {}
+    for it in live:
+        k = _same_deliverable_key(it)
+        if k:
+            by_key.setdefault(k, []).append(it)
+    groups += [g for g in by_key.values() if len(g) > 1]
+    # "Exam 1" and "Midterm 1" of one course on one day are one exam.
+    exams = {}
+    # Canvas types its midterms "assignment", the syllabus "assessment".
+    for it in live:
+        ek = _exam_key(it.get("title"))
+        if ek and it.get("kind") in ("assignment", "assessment") \
+                and it.get("date") and it.get("course"):
+            exams.setdefault((it["course"], ek, it["date"]), []).append(it)
+    groups += [g for g in exams.values() if len(g) > 1]
+    # An unnumbered syllabus homework placeholder joins the best numbered
+    # homework due the same day; numbered homeworks stay separate items.
+    hw = {}
+    for it in live:
+        k = _weekly_homework_key(it)
+        if k:
+            hw.setdefault(k, []).append(it)
+    for members in hw.values():
+        numbered = [m for m in members if _same_deliverable_key(m)
+                    or _CHAPTER_RE.search(str(m.get("title") or ""))]
+        if not numbered:
+            continue
+        keeper = max(numbered, key=_keeper_rank)
+        groups += [[keeper, m] for m in members
+                   if m not in numbered and m.get("status") in _OPEN_ST]
+    events =[it for it in live if it.get("kind") in ("event", "advising")
+              and it.get("date")]
+    seen = set()
+    for i, it in enumerate(events):
+        if id(it) in seen:
+            continue
+        group = [it]
+        for other in events[i + 1:]:
+            if id(other) not in seen and other["date"] == it["date"] \
+                    and any(_same_event(m, other) or _same_listing(m, other)
+                            for m in group):
+                group.append(other)
+        if len(group) > 1:
+            seen.update(id(m) for m in group)
+            groups.append(group)
+    retired = []
+    for group in groups:
+        keeper = max(group, key=_keeper_rank)
+        for it in group:
+            if it is keeper:
+                continue
+            for field in ("location", "time", "end_time", "canvas_url"):
+                if not keeper.get(field) and it.get(field):
+                    keeper[field] = it[field]
+            # The campus section ranks by this: a fair a digest email scored
+            # low keeps the calendar's or Handshake's higher score.
+            if lifecycle.relevance_score(it) > lifecycle.relevance_score(keeper):
+                keeper["relevance"] = it["relevance"]
+            have = {l.get("url") for l in keeper.get("links") or ()}
+            extra = [l for l in it.get("links") or ()
+                     if l.get("url") not in have]
+            if extra:
+                keeper["links"] = list(keeper.get("links") or ()) + extra
+            keeper["source_refs"] = _merge_source_refs(
+                keeper.get("source_refs"), it.get("source_refs"))
+            note = (it.get("notes") or "").strip()
+            if note and note not in (keeper.get("notes") or "") \
+                    and not note.startswith("Why you're seeing this"):
+                keeper["notes"] = ("%s\n%s" % (
+                    keeper.get("notes") or "", note)).strip()
+            if it.get("status") in _USER_CLOSED \
+                    and keeper.get("status") in _OPEN_ST:
+                keeper["status"] = it["status"]
+            if it.get("status") in _OPEN_ST:
+                it["status"] = "expired"
+                it["expired_reason"] = "duplicate of %s" % keeper.get("id")
+                retired.append(it.get("id"))
+    if retired:
+        run.log_error("step6", "INFO", "%d item(s) retired as duplicates of "
+                      "the same deliverable or event: %s"
+                      % (len(retired), ", ".join(retired)))
+    return retired
 
 
 def _dedupe_open_leads(run, items):
@@ -2239,13 +3485,14 @@ def _dedupe_open_leads(run, items):
     return dropped
 
 
-def _shown_leads(leads):
-    """The LEADS_SHOWN_MAX leads to render: highest discovery score first,
-    then the ones already on the page (so they finish aging out rather than
-    being bumped forever), then oldest id for stability."""
+def _shown_leads(leads, adjust=None):
+    """The LEADS_SHOWN_MAX leads to render: highest discovery score first (plus
+    `adjust`, the §15 rating tilt, when given), then the ones already on the
+    page (so they finish aging out rather than being bumped forever), then
+    oldest id for stability."""
     ranked = sorted(leads, key=lambda it: (
-        -(it.get("score") or 0), -int(it.get("times_surfaced") or 0),
-        str(it.get("id"))))
+        -((it.get("score") or 0) + (adjust(it) if adjust else 0.0)),
+        -int(it.get("times_surfaced") or 0), str(it.get("id"))))
     return ranked[:LEADS_SHOWN_MAX], ranked[LEADS_SHOWN_MAX:]
 
 
@@ -2257,7 +3504,11 @@ def step6_lifecycle(run, ctx, items):
     done/resolved endpoints write it directly) -- so synced_handled/
     synced_dismissed are always empty; substep 6.1 is a structural no-op.
     """
-    tallies = feedback.aggregate([])  # TODO(Phase 6): read the `feedback` table
+    conn = dbmod.connect(run.db_path)
+    try:
+        tallies = feedback.aggregate(feedback.load(conn))
+    finally:
+        conn.close()
     items, report = lifecycle.run(items, ctx["today"], changed_ids=run.moved_ids)
     return items, report, tallies
 
@@ -2436,6 +3687,9 @@ _GENERIC_LEAD_ASKS = ("Read the source and decide if it's worth one email",
 def _prep_row(item, today):
     """Raw stored item (§3.3) -> the "8b spec row" shape build_row() reads."""
     row = dict(item)
+    if item.get("kind") != "event":
+        row["title"] = render_briefing.shown_title(item.get("title"),
+                                                   item.get("date"))
     due_flag = _due_flag_text(item, today)
     row["due_flag_text"] = due_flag
     row["days_out_meta"] = "" if due_flag else lifecycle.days_out_meta(
@@ -2458,6 +3712,17 @@ def _prep_row(item, today):
     row["expand_context"] = _build_expand_context(item)
     row["add_reminder_url"] = _add_reminder_url(item, today)
     row["act_by_line"] = _act_by_line(item, today)
+    app = item.get("application") or {}
+    if app.get("stage") in applications.STAGES:
+        row["app_stage"] = app["stage"]
+        row["app_stage_label"] = applications.LABELS[app["stage"]]
+        row["app_follow_up"] = app.get("follow_up_on") or ""
+        row["draft_url"] = app.get("draft_url") if str(
+            app.get("draft_url") or "").startswith("https://") else ""
+        row["app_prior_stage"] = applications.undo_stage(app)
+        if applications.is_active(app):
+            row["act_by_line"] = applications.next_step(
+                app, item.get("date"), item.get("act_by"), today)
     row["action_tag"] = lifecycle.action_tag(item)
     if item.get("regime") == "lead":
         # The generic defaults said the same thing on every card.
@@ -2479,7 +3744,21 @@ _OPP_TYPE_LABEL = {"internship": "Internship", "research": "Research",
                    "fellowship": "Fellowship", "scholarship": "Scholarship",
                    "competition": "Competition", "program": "Program",
                    "job": "Job", "info-session": "Info session",
-                   "other": "Opportunity"}
+                   "watch": "Watching", "other": "Opportunity"}
+
+
+def _opportunity_happens(item, opp):
+    """True when the row's date is when something takes place, not when
+    applications close. An info session always happens on its date (an
+    Instagram link as `apply_url` made one read "closes Mon, Oct 5"); so
+    does an untyped row with a clock time, such as a noon panel; a program
+    with nowhere to apply is an announcement of an event."""
+    kind = opp.get("type")
+    if kind == "info-session":
+        return True
+    if kind == "program":
+        return not opp.get("apply_url")
+    return not kind and item.get("time") not in (None, "", "23:59")
 
 
 def _opportunity_row_fields(item, today):
@@ -2490,15 +3769,20 @@ def _opportunity_row_fields(item, today):
     d = as_date_safe(item.get("date"))
     bits = [_OPP_TYPE_LABEL.get(opp.get("type"), "Opportunity")]
     # Named only when the title does not already say who runs it ("Social
-    # Media & Growth Intern - Capy's Journey" read "... · CAPY'S JOURNEY").
+    # Media & Growth Intern - Example Startup" read "... · CAPY'S JOURNEY").
     if opp.get("organization") and _norm_text(opp["organization"]) not in \
             _norm_text(item.get("title")):
         bits.append(opp["organization"])
     if d is not None:
         n = (d - today).days
-        if opp.get("type") in ("info-session", "program") and not opp.get("apply_url"):
+        if n < 0:
+            bits.append("closed %s" % _short_date(d))
+        elif _opportunity_happens(item, opp):
             when = "today" if n == 0 else "tomorrow" if n == 1 else "in %d days" % n
-            bits.append("%s (%s)" % (_short_date(d), when))
+            at = _fmt_time_12h(item.get("time")) \
+                if item.get("time") != "23:59" else ""
+            bits.append("%s%s (%s)" % (_short_date(d), ", " + at if at else "",
+                                       when))
         else:
             bits.append("closes today" if n == 0 else "closes tomorrow" if n == 1
                         else "closes %s (%d days)" % (_short_date(d), n))
@@ -2512,6 +3796,32 @@ def _opportunity_row_fields(item, today):
     if opp.get("eligibility") and not out["dossier"].get("eligibility"):
         out["dossier"] = dict(out["dossier"], eligibility=opp["eligibility"])
     return out
+
+
+def _application_due(item, today):
+    """True when a tracked application asks for something today: a
+    follow-up that has come due, or an application whose start-by date or
+    deadline is here."""
+    app = item.get("application")
+    if applications.follow_up_due(app, today):
+        return True
+    if (app or {}).get("stage") != "applying":
+        return False
+    for d in (as_date_safe(item.get("act_by")), as_date_safe(item.get("date"))):
+        if d is not None and (d - today).days <= 1:
+            return True
+    return False
+
+
+def _application_sort_key(item, today):
+    """What needs doing soonest first: a due step, then the nearest of the
+    deadline / follow-up date, then the rest."""
+    app = item.get("application") or {}
+    dates = [as_date_safe(item.get("date")) if app.get("stage") == "applying"
+             else None, as_date_safe(app.get("follow_up_on"))]
+    dates = [d for d in dates if d is not None]
+    return (not _application_due(item, today),
+            min(dates) if dates else _date.max, str(item.get("id")))
 
 
 def _prep_group_row(group, today):
@@ -2555,8 +3865,9 @@ Rules:
 - Precedence: anything overdue; then what is due today; then a heavy day or \
 the next exam this week (name it, with its course code); otherwise the \
 day's shape plainly (e.g. "Nothing due today; ECON001 SmartBook Ch. 6 is \
-Monday."). If room remains and `opportunity_closing_soon` is non-empty, \
-end with the first one.
+Monday."). If room remains, end with the first entry of \
+`application_steps_due` (an application he is working on that needs a step \
+today), else of `opportunity_closing_soon`.
 - Write times exactly as given (e.g. "11:59 PM"), never as 24-hour clock.
 - Name specific items (course code + title) rather than counting them.
 """
@@ -2663,10 +3974,17 @@ def _near_duplicates(items, today):
          Homework (Chapter HW)") on a day Canvas lists the specific items
          of the same kind for the same course ("HW Chap 04", "HW Chap 05").
     """
+    def _candidate(it):
+        return (it.get("status") in ("new", "ongoing")
+                and not lifecycle.in_attention(it)
+                and it.get("regime") != "lead"
+                and not applications.is_active(it.get("application")))
+
+    # A twin the user already dismissed or handled counts as a twin: the
+    # open row is the same thing coming back (2026-09-29, "HW Chap 06"
+    # handled, its syllabus placeholder shown again).
     live = [it for it in items
-            if it.get("status") in ("new", "ongoing")
-            and not lifecycle.in_attention(it)
-            and it.get("regime") != "lead"
+            if (_candidate(it) or it.get("status") in _USER_CLOSED)
             and as_date_safe(it.get("date")) is not None
             and as_date_safe(it.get("date")) >= today]
     hidden = set()
@@ -2683,9 +4001,18 @@ def _near_duplicates(items, today):
             if not ta or not tb:
                 continue
             jac = len(ta & tb) / float(len(ta | tb))
-            if jac >= 0.75 or (min(len(ta), len(tb)) >= 3 and
-                               (ta <= tb or tb <= ta)):
-                loser = min((a, b), key=_render_rank)
+            same_key = any(
+                k(a) is not None and k(a) == k(b)
+                for k in (_same_deliverable_key, _match_key))
+            if same_key or jac >= 0.75 or (min(len(ta), len(tb)) >= 3 and
+                                           (ta <= tb or tb <= ta)):
+                closed = [x for x in (a, b) if x.get("status") in _USER_CLOSED]
+                if closed and len(closed) == 1:
+                    loser = a if b in closed else b
+                elif closed:
+                    continue
+                else:
+                    loser = min((a, b), key=_render_rank)
                 hidden.add(loser.get("id"))
     by_day = {}
     for it in live:
@@ -2699,12 +4026,34 @@ def _near_duplicates(items, today):
             continue
         for it in group:
             title = str(it.get("title") or "")
-            if it in specific or re.search(r"\d", title):
+            if it in specific or re.search(r"\d", title) \
+                    or not _candidate(it):
                 continue
             if "weekly" in title.lower() and _item_authority(it) and not any(
                     (r or {}).get("source") in ("canvas_scraper", "gmail")
                     for r in it.get("source_refs") or ()):
                 hidden.add(it.get("id"))
+    # A weekly homework placeholder also yields to Canvas homework of its
+    # course due within a few days: Canvas moved that week's homework off
+    # the syllabus day (2026-10-02: "Homework Due (weekly)" on Tue 10/6, an
+    # exam day, while Canvas has HW Chap 07/08 due Fri 10/9). It used to be
+    # hidden only because Canvas typed the midterm that day an assignment.
+    canvas_hw = [c for c in live if _weekly_homework_key(c) and any(
+        (r or {}).get("source") == "canvas_scraper"
+        for r in c.get("source_refs") or ())]
+    for it in live:
+        title = str(it.get("title") or "")
+        if it.get("id") in hidden or not _candidate(it) \
+                or "weekly" not in title.lower() or re.search(r"\d", title) \
+                or not _weekly_homework_key(it) or any(
+                    (r or {}).get("source") in ("canvas_scraper", "gmail")
+                    for r in it.get("source_refs") or ()):
+            continue
+        d = as_date_safe(it["date"])
+        if any(c["course"] == it["course"] and abs(
+                (as_date_safe(c["date"]) - d).days) <= WEEKLY_HW_SLACK_DAYS
+               for c in canvas_hw):
+            hidden.add(it.get("id"))
     return hidden
 
 
@@ -2723,11 +4072,12 @@ def _next_of(rows, today, exam_only=False, within_days=7):
     if best is None:
         return None
     d, it = best
-    return {"title": it.get("title"), "course": it.get("course_label") or "",
+    return {"title": render_briefing.shown_title(it.get("title"), d),
+            "course": it.get("course_label") or "",
             "when": _when_phrase(d, today)}
 
 
-def step7_compose(run, ctx, items, llm_enabled=False):
+def step7_compose(run, ctx, items, llm_enabled=False, tallies=None):
     for it in items:
         it.setdefault("evidence", "include")
         it.setdefault("needs_attention", False)
@@ -2770,6 +4120,7 @@ def step7_compose(run, ctx, items, llm_enabled=False):
                 it["course_class"] = COURSE_LABEL_TO_CLASS.get(fixed, "none")
 
     hidden = _near_duplicates(items, ctx["today"])
+    run.hidden_ids = hidden   # published with the page (step9) for notify.py
     if hidden:
         run.log_error("step7", "INFO",
                       "%d near-duplicate row(s) left off today's page: %s"
@@ -2796,13 +4147,26 @@ def step7_compose(run, ctx, items, llm_enabled=False):
         buckets["coming_up"], ctx["today"], cap=coming_up_cap)
     attention_primary, attention_secondary = lifecycle.order_attention(
         buckets["attention"], ctx["today"], cap=attention_cap)
+    # §15 ratings: a family thumbed down twice sinks to the bottom of Worth
+    # your time; ups and downs tilt the rest (feedback.weight, bounded).
+    rating_of = lambda it: feedback.weight(it, tallies)  # noqa: E731
     campus_rows, campus_held_back = lifecycle.order_campus(
-        buckets["campus"], ctx["today"], cap=campus_cap)
-    shown_leads, waiting_leads = _shown_leads(buckets["leads"])
+        buckets["campus"], ctx["today"], cap=campus_cap,
+        demoted_ids=[it.get("id") for it in buckets["campus"]
+                     if feedback.demoted(it, tallies)],
+        adjust=rating_of)
+    shown_leads, waiting_leads = _shown_leads(buckets["leads"], adjust=rating_of)
     opps = sorted(buckets["opportunities"], key=lambda it: (
         as_date_safe(it.get("date")) is None,
         as_date_safe(it.get("date")) or ctx["today"], str(it.get("id"))))
-    shown_opps = opps[:OPPORTUNITIES_SHOWN_MAX]
+    # Applications in progress always show, ahead of the rest; the cap
+    # limits only what he has not acted on yet.
+    tracked = sorted((it for it in opps
+                      if applications.is_active(it.get("application"))),
+                     key=lambda it: _application_sort_key(it, ctx["today"]))
+    untracked = [it for it in opps
+                 if not applications.is_active(it.get("application"))]
+    shown_opps = tracked + untracked[:OPPORTUNITIES_SHOWN_MAX]
     leads_stamp = ("Top %d of %d open" % (len(shown_leads),
                                           len(shown_leads) + len(waiting_leads))
                    if waiting_leads else "")
@@ -2827,6 +4191,8 @@ def step7_compose(run, ctx, items, llm_enabled=False):
         # there is nothing left to demote at compose time the way
         # coming_up/attention/campus need to be.
         "leads": _prep_section(shown_leads, ctx["today"]),
+        # Every open lead past the shown cap, behind a disclosure.
+        "leads_more": _prep_section(waiting_leads, ctx["today"]),
         "opportunities": _prep_section(shown_opps, ctx["today"]),
     }
 
@@ -2836,15 +4202,18 @@ def step7_compose(run, ctx, items, llm_enabled=False):
                 if as_date_safe(i.get("date")) == ctx["today"]]
     facts = {
         "overdue": [{"title": i.get("title")} for i in overdue_items],
-        "urgent_due_today": [{"title": ("%s %s" % (i.get("course_label") or "",
-                                                  i.get("title") or "")).strip(),
+        "urgent_due_today": [{"title": ("%s %s" % (
+                                  i.get("course_label") or "",
+                                  render_briefing.shown_title(
+                                      i.get("title"), i.get("date")))).strip(),
                               "time": _fmt_time_12h(i.get("time"))}
                              for i in due_today],
         "heavy_day": ({"date_label": _when_phrase(heavy["date"], ctx["today"]),
                        "count": heavy["count"],
                        "titles": [
                            ("%s %s" % (i.get("course_label") or "",
-                                       i.get("title") or "")).strip()
+                                       render_briefing.shown_title(
+                                           i.get("title"), i.get("date")))).strip()
                            for i in sorted(
                                (i for i in buckets["assignments"]
                                 + buckets["assessments"]
@@ -2860,8 +4229,14 @@ def step7_compose(run, ctx, items, llm_enabled=False):
                 "type") == "info-session" else "%s: applications close %s") % (
                 it.get("title"),
                 _when_phrase(as_date_safe(it.get("date")), ctx["today"]))
-            for it in shown_opps if as_date_safe(it.get("date")) is not None
+            for it in untracked[:OPPORTUNITIES_SHOWN_MAX]
+            if as_date_safe(it.get("date")) is not None
             and (as_date_safe(it.get("date")) - ctx["today"]).days <= 3][:2],
+        "application_steps_due": [
+            "%s: %s" % (it.get("title"), applications.next_step(
+                it["application"], it.get("date"), it.get("act_by"),
+                ctx["today"]))
+            for it in tracked if _application_due(it, ctx["today"])][:2],
         "assignment_count": len(buckets["assignments"]),
         "assessment_count": len(buckets["assessments"]),
     }
@@ -2874,9 +4249,12 @@ def step7_compose(run, ctx, items, llm_enabled=False):
         "caps": {"campus": campus_cap, "coming_up": coming_up_cap,
                  "attention": attention_cap},
         "leads_stamp": leads_stamp,
-        "opps_stamp": ("Top %d of %d open" % (len(shown_opps), len(opps))
-                       if len(opps) > len(shown_opps) else
-                       "%d open" % len(opps) if opps else ""),
+        "opps_stamp": " · ".join(x for x in (
+            "%d in progress" % len(tracked) if tracked else "",
+            ("Top %d of %d open" % (len(shown_opps) - len(tracked),
+                                    len(untracked))
+             if len(untracked) > len(shown_opps) - len(tracked) else
+             "%d open" % len(untracked) if untracked else "")) if x),
     }
 
 
@@ -2890,19 +4268,33 @@ def _short_date(d):
     return "%s, %s %d" % (d.strftime("%a"), d.strftime("%b"), d.day)
 
 
-def _status_label(ctx, n_emails_processed):
+def _status_label(ctx, n_emails_processed, db_path=None):
+    """The footer's mail line. A build that did not read email (not due
+    under Sources, or turned off) says when mail was last read rather than
+    "No new mail to sort", which it cannot know. No "repeat run": since the
+    hourly rebuilds (2026-09-29) every page after 06:30 is one, and the
+    time beside this already says when the page was built."""
     state = ctx["state"]
     if state.get("automation_mode") == "paused":
         suffix = "filing paused"
     else:
         suffix = "filing on"
-    label = ("%d email%s sorted" % (n_emails_processed,
-                                    "" if n_emails_processed == 1 else "s")
-             if n_emails_processed else "No new mail to sort")
-    label = "%s · %s" % (label, suffix)
-    if ctx.get("is_repeat"):
-        label += " · repeat run"
-    return label
+    src = ctx.get("sources") or {}
+    if n_emails_processed:
+        label = "%d email%s sorted" % (
+            n_emails_processed, "" if n_emails_processed == 1 else "s")
+    elif "enabled" in src and "gmail" not in src["enabled"]:
+        return "Email is off in Sources"
+    elif "fetch" in src and "gmail" not in src["fetch"] and db_path:
+        last = sources._parse((sources.load_status(db_path).get("gmail")
+                               or {}).get("last_success"))
+        label = ("Mail last read %s" % (
+            last.strftime("%-I:%M %p") if last.date() == ctx["today"]
+            else "%s %s" % (last.strftime("%a"), last.strftime("%-I:%M %p")))
+            if last else "No new mail to sort")
+    else:
+        label = "No new mail to sort"
+    return "%s · %s" % (label, suffix)
 
 
 def _pane_stamp(pane, today):
@@ -2928,6 +4320,17 @@ _MONITORED_SOURCES = ("gmail", "gcal_class", "gcal_canvas", "gcal_syllabi",
                       "umd_calendar", "canvas-scraper", "web_search")
 
 
+# What I can't see names the source, not the pipeline step that read it.
+_STEP_LABELS = {
+    "step1": "Email", "step1-2": "Email", "step4": "Calendar",
+    "step5": "Weather", "step5b": "Campus events", "step5c": "Web search",
+    "step5d": "Grades", "step5e": "What changed",
+    "step5f": "Opportunity research", "step5g": "Handshake",
+    "canvas": "Canvas", "canvas-scraper": "Canvas",
+}
+_UNEXPECTED_RE = re.compile(r"^\S+ failed unexpectedly: ")
+
+
 def _run_events(run):
     """§13.4's `run_events`: what THIS run actually tried and did not get.
 
@@ -2943,8 +4346,10 @@ def _run_events(run):
     for e in run.errors:
         if e["severity"] not in ("MAJOR", "CRITICAL"):
             continue
-        events.append({"source": e["source"], "outcome": "failed",
-                       "detail": e["message"]})
+        detail = _UNEXPECTED_RE.sub("", e["message"])
+        detail = detail.replace(" -- continuing without it", "")
+        events.append({"source": _STEP_LABELS.get(e["source"], e["source"]),
+                       "outcome": "failed", "detail": detail})
     for s in run.skipped:
         source, _, detail = s.partition(":")
         detail = detail.strip()
@@ -2955,19 +4360,30 @@ def _run_events(run):
         # here rather than a separate flag threaded through every step.
         if detail.startswith("dry-run") or detail.startswith("not needed"):
             continue
-        events.append({"source": source.strip() or "a step",
+        source = source.strip()
+        events.append({"source": _STEP_LABELS.get(source, source or "a step"),
                        "outcome": "skipped", "detail": detail})
     return events
 
 
-def _changes_range(run, today):
-    since = (getattr(run, "digest_baseline", None) or {}).get("since")
-    if not since:
-        return "since yesterday's brief"
-    at = datetime.fromtimestamp(float(since), TZ)
+def _stamp_text(epoch, today):
+    at = datetime.fromtimestamp(float(epoch), TZ)
     if at.date() == today:
-        return "since %s" % at.strftime("%-I:%M %p")
-    return "since %s %s" % (at.strftime("%a"), at.strftime("%-I:%M %p"))
+        return at.strftime("%-I:%M %p")
+    return "%s %s" % (at.strftime("%a"), at.strftime("%-I:%M %p"))
+
+
+def _changes_range(run, today):
+    """The What changed eyebrow: the window start, then when Canvas was last
+    checked. Canvas runs every 2 hours and a quiet scrape writes no change
+    row, so the start alone went stale for the whole day."""
+    since = (getattr(run, "digest_baseline", None) or {}).get("since")
+    head = ("since %s" % _stamp_text(since, today)) if since \
+        else "since yesterday's brief"
+    checked = digest.last_checked(canvas_shadow.CANVAS_CACHE_DB)
+    if not checked:
+        return head
+    return "%s · Canvas checked %s" % (head, _stamp_text(checked, today))
 
 
 def change_strip_text(counts, changes, comparable):
@@ -2979,6 +4395,8 @@ def change_strip_text(counts, changes, comparable):
     kinds = {}
     for g in changes or ():
         for e in g.get("entries") or ():
+            if e.get("own_move"):  # already in counts["moved"]
+                continue
             kinds[e.get("label")] = kinds.get(e.get("label"), 0) + 1
     parts = []
     for n, one, many in (
@@ -3020,7 +4438,13 @@ def _build_spec(run, ctx, composed, timeline_info, forecast, grade_info=None,
         "TLDR": composed["tldr"],
         "TIME_LABEL": "Generated %s ET · %s" % (
             now_et.strftime("%-I:%M %p"), _short_date(today)),
-        "STATUS_LABEL": _status_label(ctx, run.emails_processed),
+        # The phone footer shows only this (TIME_LABEL is desktop-only), and
+        # ticks rebuild the page all day: "10/17" alone did not say how fresh
+        # it was.
+        "RUN_SHORT": "%d/%d, %s" % (today.month, today.day,
+                                    now_et.strftime("%-I:%M %p")),
+        "STATUS_LABEL": _status_label(ctx, run.emails_processed,
+                                      run.db_path),
         # Leads' eyebrow. Used to read "Rebuilt <panes.week.built_on>", a
         # date nothing in this pipeline ever advanced (it said "Rebuilt Wed,
         # Sep 9" ten days later). Now it states the one true fact about the
@@ -3075,6 +4499,7 @@ def _build_spec(run, ctx, composed, timeline_info, forecast, grade_info=None,
             "attention_more": composed["prepped"]["attention_more"],
             "campus": composed["prepped"]["campus"],
             "leads": composed["prepped"]["leads"],
+            "leads_more": composed["prepped"].get("leads_more") or [],
             "opportunities": composed["prepped"].get("opportunities") or [],
         },
         # Brief v2: What changed (digest.build() groups) and the course map
@@ -3191,6 +4616,9 @@ def step8_render(run, ctx, spec_dict):
 
 # --- STEP 9: publish (no tool call -- write to SQLite) ---------------------
 
+PAGE_HIDDEN_KEY = "page_hidden_ids"
+
+
 def step9_publish(run, ctx, html):
     if html is None:
         run.log_error("step9", "CRITICAL", "gate did not pass; not publishing")
@@ -3214,6 +4642,11 @@ def step9_publish(run, ctx, html):
         conn.commit()
     finally:
         conn.close()
+    # Rows the page leaves off as near-duplicates: notify.py must not push
+    # what the page hides (2026-09-29: a syllabus placeholder pushed
+    # "Deadline soon" beside its Canvas twin).
+    store.kv_set(run.db_path, PAGE_HIDDEN_KEY,
+                 sorted(getattr(run, "hidden_ids", ()) or ()))
     return True
 
 
@@ -3233,15 +4666,16 @@ def step10_deliver(run, ctx, summary_line, page_url, published=True):
         run.skipped.append("step10: dry-run, nothing sent")
         return delivery
 
-    if published:
+    # A same-day rebuild (the Sources tick) already has today's record.
+    if published and not ctx.get("is_repeat"):
         record = {"date": ctx["today"].isoformat(), "page_url": page_url}
         try:
             folder_id = ctx["state"].get("briefings_folder_id")
-            if folder_id and google_api.folder_ok(folder_id, root=ROOT):
+            if folder_id and google_api.folder_ok(folder_id):
                 google_api.create_json(
                     folder_id, "college_brief_%s.json"
                     % ctx["today"].isoformat(),
-                    json.dumps(record, separators=(",", ":")), root=ROOT)
+                    json.dumps(record, separators=(",", ":")))
                 delivery["drive"] = True
             else:
                 run.log_error("step10", "MINOR",
@@ -3251,6 +4685,12 @@ def step10_deliver(run, ctx, summary_line, page_url, published=True):
             run.log_error("step10", "MINOR", "Drive archive failed: %s" % exc)
 
     if ctx.get("is_repeat"):
+        return delivery
+    if not published and sources.retry_left(run.db_path, ctx["now_et"]):
+        # One email a day: a failed build is retried, and the retry that
+        # publishes sends it. A failure notice goes out only when retries run out.
+        run.log_error("step10", "INFO", "page did not publish; a retry is "
+                      "scheduled and the day's email waits for it")
         return delivery
     line = summary_line if published else _failure_summary(ctx)
     delivery["email"] = _send_email(run, ctx, line, page_url)
@@ -3270,7 +4710,7 @@ def _send_email(run, ctx, line, page_url):
     caught, so an HttpError/network error aborted before state was
     written)."""
     try:
-        result = google_api.send_daily_briefing_email(
+        result = briefing_google.send_daily_briefing_email(
             line, page_url, ctx["today"].isoformat(), root=ROOT)
     except RuntimeError as exc:
         run.log_error("step10", "MAJOR", str(exc))
@@ -3356,8 +4796,6 @@ def step11_write_state(run, ctx, items, delivery):
     state["last_run_stats"] = run_stats.prepend(
         state.get("last_run_stats"), entry)
 
-    state["errors"] = (run.errors + (state.get("errors") or []))[:50]
-
     if run.dry_run:
         run.skipped.append("step11: dry-run, not written to briefing.db")
         return state
@@ -3432,33 +4870,62 @@ def run_pipeline(run):
     ctx = step0_facts(run)
     live = not run.dry_run
 
-    candidates = _guarded(run, "step1-2", step1_2_gmail_sweep, [],
-                          run, ctx) if live else []
+    canvas_on = "canvas" in ctx["sources"]["enabled"]
+    if not canvas_on:
+        run.skipped.append("canvas: turned off in Sources -- no Canvas "
+                           "items, grades or What changed")
+    candidates = _source_step(run, ctx, "gmail", "step1-2",
+                              step1_2_gmail_sweep, [], run, ctx) \
+        if live else []
     candidates = candidates + (_canvas_scraper_candidates(run, ctx)
-                               if live else [])
+                               if live and canvas_on else [])
+    if live and "calendar" in ctx["sources"]["enabled"]:
+        candidates = candidates + _guarded(
+            run, "step3-syllabi", _syllabus_calendar_candidates, [], run, ctx)
     items = step3_reconcile(run, ctx, candidates)
-    timeline_info = _guarded(
-        run, "step4", step4_schedule,
-        {"timeline": [], "tight_alert": None, "busy_blocks": []}, run, ctx)
-    forecast = _guarded(run, "step5", step5_umbrella, None, run, ctx)
-    campus_items = _guarded(run, "step5b", step5b_campus, [], run, ctx,
-                            timeline_info)
+    _guarded(run, "applications", _apply_application_news, None, run, ctx,
+             items, candidates)
+    if live and canvas_on:
+        _guarded(run, "step4a", step4a_canvas_cancellations, None, run, ctx,
+                 items)
+    _guarded(run, "step4b", step4b_cancellations, None, run, ctx, items) \
+        if live else None
+    timeline_info = _source_step(
+        run, ctx, "calendar", "step4", step4_schedule,
+        {"timeline": [], "tight_alert": None, "busy_blocks": []}, run, ctx,
+        cache=True)
+    forecast = _source_step(run, ctx, "weather", "step5", step5_umbrella,
+                            None, run, ctx, cache=True)
+    campus_items = _source_step(run, ctx, "campus", "step5b", step5b_campus,
+                                [], run, ctx, timeline_info)
+    no_grades = {"course_text": {}, "portfolio_notes": [], "insight_items": []}
     grade_info = _guarded(
-        run, "step5d", step5d_grades,
-        {"course_text": {}, "portfolio_notes": [], "insight_items": []},
-        run, ctx, items, llm_enabled=live)
-    leads = _guarded(run, "step5c", step5c_discovery, [], run, ctx)
-    items = _merge_generated(items, leads + grade_info["insight_items"]
-                             + campus_items)
+        run, "step5d", step5d_grades, no_grades,
+        run, ctx, items, llm_enabled=live) if canvas_on else no_grades
+    leads = _source_step(run, ctx, "discovery", "step5c", step5c_discovery,
+                         [], run, ctx)
+    _guarded(run, "step5w", step5w_watches, None, run, ctx)
+    handshake_items = _guarded(run, "step5g", step5g_handshake, [], run, ctx) \
+        if "handshake" in ctx["sources"]["enabled"] else []
+    items = _merge_generated(items, leads
+                             + grade_info["insight_items"]
+                             + campus_items + handshake_items)
     _dedupe_open_leads(run, items)
+    _retire_campus_duplicates(run, items)
+    _canvas_exams_are_assessments(run, items)
+    _retire_same_thing_duplicates(run, items)
     _retire_homepage_leads(run, items)
+    _promote_confirmed_leads(run, items, ctx["today"])
+    _attach_applications(run, items, ctx["today"])
+    relative_dates.retime_items(items, ctx["today"])
     items, lifecycle_report, tallies = step6_lifecycle(run, ctx, items)
     _guarded(run, "step5f", step5f_research, [], run, ctx, items,
              llm_enabled=live)
     changes = _guarded(run, "step5e", step5e_changes, [], run, ctx, items,
-                       llm_enabled=live)
+                       llm_enabled=live) if canvas_on else []
     step6b_ledger_surface(run, ctx, items)
-    composed = step7_compose(run, ctx, items, llm_enabled=live)
+    composed = step7_compose(run, ctx, items, llm_enabled=live,
+                             tallies=tallies)
 
     spec = _build_spec(run, ctx, composed, timeline_info, forecast, grade_info,
                        changes=changes)
@@ -3502,24 +4969,16 @@ def _record_crash(run, exc):
         type(exc).__name__, exc, traceback.format_exc(limit=6))
     run.log_error("pipeline", "CRITICAL", msg[:2000])
     try:
-        conn = dbmod.connect(run.db_path)
-        try:
-            e = run.errors[-1]
-            if not run.dry_run:
-                conn.execute(
-                    "INSERT INTO errors (at, source, severity, message) "
-                    "VALUES (?, ?, ?, ?)", (e["timestamp"], e["source"],
-                                            e["severity"], e["message"]))
-                conn.commit()
-        finally:
-            conn.close()
+        run.persist_errors()    # this run's errors, the CRITICAL one included
     except Exception:  # noqa: BLE001
         pass
     if run.dry_run:
         return
+    if sources.retry_left(run.db_path, datetime.now(TZ)):
+        return      # a retry still to come sends the day's email
     today = datetime.now(TZ).date()
     try:
-        google_api.send_daily_briefing_email(
+        briefing_google.send_daily_briefing_email(
             "Today's briefing run failed before it could finish (%s). The "
             "page still shows the last good briefing." % type(exc).__name__,
             PERSISTENT_BRIEFING_URL, today.isoformat(), root=ROOT)
@@ -3547,18 +5006,25 @@ def main():
                         help="Actually touch Gmail/Drive/email/claude -p. "
                              "Without this flag every network-touching step "
                              "is skipped and reported, not executed.")
+    parser.add_argument("--due-only", action="store_true",
+                        help="Fetch only the sources that are due "
+                             "(service/sources.py); the timers pass this.")
     parser.add_argument("--out", metavar="PATH",
                         help="Also write the rendered page here (preview a "
                              "dry run in a browser).")
     args = parser.parse_args()
 
-    run = Run(db_path=args.db, dry_run=not args.live)
+    run = Run(db_path=args.db, dry_run=not args.live, due_only=args.due_only)
     try:
         ctx, items, composed, lifecycle_report, delivery, gate_problems = \
             run_pipeline(run)
     except Exception as exc:  # noqa: BLE001
         _record_crash(run, exc)
         raise
+    try:
+        run.persist_errors()
+    except Exception as exc:  # noqa: BLE001 -- the build is saved; never a crash
+        print("errors not written: %s" % exc, file=sys.stderr)
 
     if args.out and getattr(run, "html", None):
         with open(args.out, "w", encoding="utf-8") as fh:

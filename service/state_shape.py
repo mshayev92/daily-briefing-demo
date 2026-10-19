@@ -24,6 +24,10 @@ ITEM_SCALAR_FIELDS = (
 # them is filtered or sorted on by the pure-Python modules (lifecycle.py,
 # schedule.py, opportunity.py, render_briefing.py), only read whole.
 ITEM_EXTRA_FIELDS = (
+    # 2026-10-05: relative wording re-timed each day (relative_dates.py) and
+    # cancellations marked on the calendar (cancellations.py).
+    "retime", "text_anchor", "cancellation", "cancelled", "calendar_marked",
+    "cancel_pending",
     "links", "eligibility", "basis", "relevance", "extraction",
     "ai_actions", "source_refs", "requirement_ids",
     # Canvas's own submission mechanism for an assignment/quiz object, e.g.

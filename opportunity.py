@@ -497,10 +497,11 @@ def coverage_gaps(requirements, ledger, today, monitored_sources=(),
     for ev in run_events or ():
         src = ev.get("source") or "an unnamed source"
         outcome = (ev.get("outcome") or "failed").lower()
-        verb = {"failed": "did not answer this morning",
-                "skipped": "was not read this morning",
-                "partial": "was only partly read this morning"}.get(
-                    outcome, "did not answer this morning")
+        # No "this morning": the page is rebuilt through the day.
+        verb = {"failed": "did not answer",
+                "skipped": "was not read",
+                "partial": "was only partly read"}.get(
+                    outcome, "did not answer")
         note = "%s %s" % (src, verb)
         if ev.get("detail"):
             note += " \u2014 %s" % ev["detail"]
@@ -525,7 +526,7 @@ def coverage_notes(gaps, roster_cap=4):
     roster = list(gaps.get("unmonitored_sources") or ())
     if roster and not notes:
         shown = roster[:roster_cap]
-        notes.append("Not watched at all: %s. Nothing failed this morning; "
+        notes.append("Not watched at all: %s. Nothing failed on this update; "
                      "these are simply outside what this briefing collects."
                      % ", ".join(shown))
     return notes

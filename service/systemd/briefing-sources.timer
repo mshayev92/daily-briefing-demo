@@ -1,0 +1,12 @@
+[Unit]
+Description=Refresh Daily Briefing sources that are due (Sources settings on the page)
+
+[Timer]
+# Every 15 minutes. run_daily.sh --tick refreshes only what the page's
+# Sources sheet says is due and rebuilds only when something new came in,
+# so most ticks exit in about a second without logging anything.
+OnCalendar=*:0/15
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

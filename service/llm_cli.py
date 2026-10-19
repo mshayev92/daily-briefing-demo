@@ -147,8 +147,19 @@ def _run_once(cmd, timeout, json_schema, allow_tool_use, thinking_tokens=None):
         raise ClaudeCliError("claude -p timed out after %ss" % timeout) from exc
 
     if proc.returncode != 0:
+        # With --output-format json the CLI reports API errors and usage limits
+        # in the stdout envelope, not on stderr (2026-10-14: every call failed
+        # with an empty reason), so read the envelope first.
+        try:
+            envelope = json.loads(proc.stdout)
+        except ValueError:
+            envelope = None
+        if not isinstance(envelope, dict):
+            envelope = None
+        reason = ((envelope or {}).get("result") or proc.stderr[-2000:]
+                  or proc.stdout[-500:])
         raise ClaudeCliError(
-            "claude -p exited %d: %s" % (proc.returncode, proc.stderr[-2000:]))
+            "claude -p exited %d: %s" % (proc.returncode, reason), envelope)
 
     try:
         envelope = json.loads(proc.stdout)

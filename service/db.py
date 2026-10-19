@@ -19,13 +19,34 @@ def connect(db_path=DEFAULT_DB_PATH):
     return conn
 
 
+# Columns added after a database was first created. CREATE TABLE IF NOT
+# EXISTS never adds a column to a table that already exists, so each one is
+# added here, once, when init_db() finds it missing.
+ADDED_COLUMNS = (
+    ("items", "status_changed_at", "TEXT"),   # 2026-10-10
+    ("actions", "app_before", "TEXT"),        # 2026-10-11: application record before
+    ("actions", "label", "TEXT"),             # 2026-10-11: what the undo bar says
+    ("course_grade_snapshots", "graded_items", "TEXT"),  # 2026-10-17: names for grade pushes
+)
+
+
+def _add_missing_columns(conn):
+    for table, column, decl in ADDED_COLUMNS:
+        have = {r[1] for r in conn.execute("PRAGMA table_info(%s)" % table)}
+        if column not in have:
+            conn.execute("ALTER TABLE %s ADD COLUMN %s %s"
+                         % (table, column, decl))
+
+
 def init_db(db_path=DEFAULT_DB_PATH, schema_path=SCHEMA_PATH):
-    """Create the schema if it doesn't exist yet. Idempotent (IF NOT EXISTS)."""
+    """Create the schema if it doesn't exist yet. Idempotent (IF NOT EXISTS),
+    and brings an older database up to the current columns."""
     with open(schema_path, "r", encoding="utf-8") as fh:
         schema = fh.read()
     conn = connect(db_path)
     try:
         conn.executescript(schema)
+        _add_missing_columns(conn)
         conn.commit()
     finally:
         conn.close()

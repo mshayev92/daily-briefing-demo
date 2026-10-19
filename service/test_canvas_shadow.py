@@ -3,7 +3,7 @@ Tests for canvas_shadow.py (Phase 4 shadow-mode Canvas integration).
 
 Pure/deterministic: every function under test takes its data sources as
 explicit arguments (scrape dict, cache_db path, briefing_db path), so
-these tests never touch the real ~/canvas-scraper output or the real
+these tests never touch the real ~/projects/canvas-scraper output or the real
 briefing.db -- everything here is built from synthetic fixtures in
 tmp_path, matching how canvas-scraper's own test_cli.py tests its CLI
 query layer.

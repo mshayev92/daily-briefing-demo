@@ -19,6 +19,7 @@ from state_shape import (
     ITEM_BOOL_FIELDS, ITEM_DEFAULTS, META_JSON_FIELDS, META_SCALAR_FIELDS,
 )
 import db as dbmod
+import store
 
 # CONTEXT_KEYS from state_io.py, reused so for_context() behaves identically
 # regardless of which backend loaded the state.
@@ -33,6 +34,8 @@ CONTEXT_KEYS = (
 
 def _row_to_item(row):
     d = {k: row[k] for k in ITEM_SCALAR_FIELDS if row[k] is not None}
+    if row["status_changed_at"]:
+        d["status_changed_at"] = row["status_changed_at"]
     for k in ITEM_BOOL_FIELDS:
         if k in d:
             d[k] = bool(d[k])
@@ -62,9 +65,31 @@ def _item_to_row(item):
                        ("regime", "confirmed"), ("status", "new")):
         if scalars.get(k) is None:
             scalars[k] = default
+    scalars["status_changed_at"] = item.get("status_changed_at")
     extra = {k: item[k] for k in ITEM_EXTRA_FIELDS if k in item}
     scalars["extra_json"] = json.dumps(extra, separators=(",", ":"))
     return scalars
+
+
+def _requirements(conn):
+    """state["requirements"]: the goals, with the stamp of the page's last PUT."""
+    meta = conn.execute("SELECT requirements_synced_at, requirements_version "
+                        "FROM meta WHERE id = 1").fetchone()
+    return {
+        "synced_at": meta["requirements_synced_at"] if meta else None,
+        "version": (meta["requirements_version"] if meta else None) or 1,
+        "entries": [
+            {
+                "id": r["id"],
+                "statement": r["statement"],
+                "horizon_days": r["horizon_days"],
+                "keywords": json.loads(r["keywords_json"] or "[]"),
+                "active": bool(r["active"]),
+                "quiet_after_days": r["quiet_after_days"],
+            }
+            for r in conn.execute("SELECT * FROM requirements")
+        ],
+    }
 
 
 def load(db_path=dbmod.DEFAULT_DB_PATH):
@@ -114,22 +139,7 @@ def load(db_path=dbmod.DEFAULT_DB_PATH):
                        else {"version": 1, "text": ""}),
         }
 
-        req_rows = conn.execute("SELECT * FROM requirements").fetchall()
-        state["requirements"] = {
-            "synced_at": meta_row["requirements_synced_at"],
-            "version": meta_row["requirements_version"] or 1,
-            "entries": [
-                {
-                    "id": r["id"],
-                    "statement": r["statement"],
-                    "horizon_days": r["horizon_days"],
-                    "keywords": json.loads(r["keywords_json"] or "[]"),
-                    "active": bool(r["active"]),
-                    "quiet_after_days": r["quiet_after_days"],
-                }
-                for r in req_rows
-            ],
-        }
+        state["requirements"] = _requirements(conn)
 
         stats_rows = conn.execute(
             "SELECT * FROM run_stats ORDER BY seq ASC LIMIT 7").fetchall()
@@ -154,8 +164,11 @@ def load(db_path=dbmod.DEFAULT_DB_PATH):
             for r in stats_rows
         ]
 
+        # Newest first, by time: store.append_errors() appends, so insertion
+        # order is no longer the list order.
         err_rows = conn.execute(
-            "SELECT * FROM errors ORDER BY seq ASC LIMIT 50").fetchall()
+            "SELECT * FROM errors ORDER BY at DESC, seq DESC LIMIT ?",
+            (store.ERRORS_KEEP,)).fetchall()
         # Real production state (not just SCHEMA_AND_STATE.md's abbreviated
         # example) uses `timestamp`, not `at`, on each error entry. Match the
         # actual data rather than the doc's shorthand.
@@ -180,7 +193,23 @@ def save(state, db_path=dbmod.DEFAULT_DB_PATH):
     dbmod.init_db(db_path)
     conn = dbmod.connect(db_path)
     try:
-        conn.execute("BEGIN")
+        # IMMEDIATE, not deferred: every guard below reads the stored copy, so
+        # the reads and the writes must see one snapshot. A deferred
+        # transaction that read, then wrote after a page commit, failed with
+        # SQLITE_BUSY and lost the whole run's save.
+        conn.execute("BEGIN IMMEDIATE")
+
+        # Lost-update guard for goals (2026-10-10). The page's PUT replaces the
+        # requirements table and stamps meta.requirements_synced_at. A run that
+        # loaded an older stamp adopts the stored copy instead of writing its
+        # own back over the edit.
+        stored = conn.execute("SELECT requirements_synced_at FROM meta "
+                              "WHERE id = 1").fetchone()
+        run_goals = state.get("requirements") or {}
+        if stored and stored[0] and \
+                (run_goals.get("synced_at") or "") < stored[0]:
+            state["requirements"] = _requirements(conn)
+
         conn.execute("""
             INSERT INTO meta (id, schema_version, last_updated,
                 last_completed_date, artifact_url, db_last_synced,
@@ -260,22 +289,28 @@ def save(state, db_path=dbmod.DEFAULT_DB_PATH):
                 "version", 1),
         })
 
-        # Lost-update guard (2026-09-19 audit). A run loads state, works for
-        # a minute or two, then replaces `items` wholesale -- so a Done /
-        # Resolved / Confirmed / Killed click made on the live page DURING
-        # that window used to be silently reverted. Inside this same
-        # transaction, a disposition the page wrote to the DB wins over the
-        # run's in-memory copy whenever the run still had that item open.
+        # Lost-update guard for items (2026-09-19 audit; 2026-10-10). A run
+        # loads state, works for a minute or two, then replaces `items`
+        # wholesale, so a disposition the page wrote DURING that window must
+        # win over the run's copy. The page stamps each status it writes
+        # (status_changed_at); a stored stamp newer than the one this run
+        # loaded is such a write, whatever the status. The closed-status rule
+        # below covers rows written before stamping existed.
         # (The pipeline itself never reopens a closed item except via an
         # expired snooze, and a snooze is not one of these statuses.)
-        user_closed = {
-            r[0]: r[1] for r in conn.execute(
-                "SELECT id, status FROM items WHERE status IN "
-                "('handled', 'dismissed', 'confirmed', 'killed')")}
+        stored = {r["id"]: (r["status"], r["status_changed_at"]) for r in
+                  conn.execute("SELECT id, status, status_changed_at FROM items")}
         for item in state.get("items") or []:
-            db_status = user_closed.get(item.get("id"))
-            if db_status and item.get("status") in (
-                    None, "new", "ongoing", "unresolved", "open"):
+            db = stored.get(item.get("id"))
+            if db is None:
+                continue
+            db_status, db_stamp = db
+            if db_stamp and db_stamp > (item.get("status_changed_at") or ""):
+                item["status"] = db_status
+                item["status_changed_at"] = db_stamp
+            elif db_status in ("handled", "dismissed", "confirmed", "killed") \
+                    and item.get("status") in (
+                        None, "new", "ongoing", "unresolved", "open"):
                 item["status"] = db_status
 
         conn.execute("DELETE FROM items")
@@ -329,10 +364,10 @@ def save(state, db_path=dbmod.DEFAULT_DB_PATH):
                 "quiet_after_days": req.get("quiet_after_days", 30),
             })
 
-        # `last_run_stats` and `errors` arrive already assembled and capped by
-        # the caller (run_stats.prepend(keep=7), §3.2's keep-50/drop-30-days
-        # rule) — a full replace here, in list order, mirrors how `items` is
-        # handled rather than accumulating duplicates across runs.
+        # `last_run_stats` arrives already assembled and capped by the caller
+        # (run_stats.prepend(keep=7)) -- a full replace here, in list order,
+        # mirrors how `items` is handled rather than accumulating duplicates
+        # across runs. (`errors` is append-only: see store.append_errors().)
         conn.execute("DELETE FROM run_stats")
         for r in state.get("last_run_stats") or []:
             conn.execute("""
@@ -364,15 +399,8 @@ def save(state, db_path=dbmod.DEFAULT_DB_PATH):
                 "skipped_json": json.dumps(r.get("skipped") or []),
             })
 
-        conn.execute("DELETE FROM errors")
-        for err in state.get("errors") or []:
-            conn.execute(
-                "INSERT INTO errors (at, source, severity, message) "
-                "VALUES (:at, :source, :severity, :message)",
-                {"at": err.get("timestamp") or err.get("at"),
-                 "source": err.get("source"),
-                 "severity": err.get("severity"), "message": err.get(
-                     "message", "")})
+        # errors are not written here: store.append_errors() appends them, so
+        # a stale copy in `state` cannot replace rows another writer added.
 
         conn.commit()
     except Exception:

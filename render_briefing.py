@@ -16,6 +16,9 @@ import datetime as _dt
 import html as _html
 import re
 from urllib.parse import parse_qs, urlparse
+from zoneinfo import ZoneInfo
+
+_ET = ZoneInfo("America/New_York")
 
 MARKERS = {
     "pills": "<!-- INSERT MASTHEAD PILLS HERE -->",
@@ -34,6 +37,8 @@ MARKERS = {
     # attention_more above gives Needs your attention's own overflow.
     "further_more": "<!-- INSERT SECONDARY FURTHER ROWS HERE -->",
     "leads": "<!-- INSERT LEAD ROWS HERE -->",
+    # Open leads past the shown cap, behind their own disclosure in Leads.
+    "leads_more": "<!-- INSERT MORE LEAD ROWS HERE -->",
     "changes": "<!-- INSERT CHANGES HERE -->",
     "opportunities": "<!-- INSERT OPPORTUNITY ROWS HERE -->",
     "coverage": "<!-- INSERT COVERAGE NOTES HERE -->",
@@ -46,17 +51,19 @@ EMPTY_NOTES = {
     # Says what happened, not "nothing is on": the fetch may have run and
     # matched nothing, which is a statement about the filter, not the campus.
     "campus": "No campus events matched your preferences this week.",
+    # Leads are vetted against his goals; none passing is a statement about
+    # the filter, shown the same way as an empty Today or Attention.
+    "leads": "No leads vetted for your goals right now.",
 }
 
 # Sections that are deleted as a unit when they have nothing to show. The
-# design has no empty state for any of them, and an empty "Further out" or
-# "Leads" heading is a sentence about nothing.
+# design has no empty state for any of them, and an empty "Further out"
+# heading is a sentence about nothing.
 OPTIONAL_SECTIONS = {
     "schedule": "section-schedule",
     "changes": "section-changes",
     "standing": "section-standing",
     "further": "section-further",
-    "leads": "section-leads",
     "opportunities": "section-opportunities",
     "coverage": "section-coverage",
 }
@@ -65,6 +72,7 @@ SECTION_IDS = {
     "today": "section-today",
     "campus": "section-campus",
     "attention": "section-attention",
+    "leads": "section-leads",
 }
 
 
@@ -345,6 +353,15 @@ def drop_further_more(out):
     return _FURTHER_MORE_RE.sub("", out)
 
 
+_LEADS_MORE_RE = re.compile(r'\n\s*<details class="more leads-more">.*?</details>', re.S)
+
+
+def drop_leads_more(out):
+    """Remove Leads' overflow `<details>` as a unit, same reasoning as
+    drop_attn_more() above."""
+    return _LEADS_MORE_RE.sub("", out)
+
+
 def drop_section(out, section_id):
     """Delete one optional section, heading and all. Keyed on the template's
     `/section-id` end comment, so it must run BEFORE comments are stripped."""
@@ -381,6 +398,9 @@ def render(template=None, ctx=None, template_path=None):
     if not ctx.get("FURTHER_MORE_LABEL") or not sections.get(
             "further_more", "").strip():
         t = drop_further_more(t)
+    if not ctx.get("LEADS_MORE_LABEL") or not sections.get(
+            "leads_more", "").strip():
+        t = drop_leads_more(t)
     for name, sec_id in OPTIONAL_SECTIONS.items():
         if not sections.get(name, "").strip():
             t = drop_section(t, sec_id)
@@ -429,15 +449,17 @@ CANONICAL_LABELS = (
     ("Needs your attention",),
     ("What changed",),
     ("This week",),
-    ("Opportunities",),
-    ("Today — around campus", "This week — around campus"),
     ("Where you stand",),
     ("Further out",),
+    ("Today — around campus", "This week — around campus"),
+    ("Opportunities",),
+    ("Things watching",),   # the user's own watches (store.watch_hits)
     ("Leads — unconfirmed, worth one look",),
     ("What I can't see",),
 )
 MANDATORY_LABELS = {"Today — Due", "Today — around campus",
-                    "This week", "Needs your attention"}
+                    "This week", "Needs your attention",
+                    "Leads — unconfirmed, worth one look"}
 
 # data-kind -> the §14.1 regime a row of that kind must carry.
 KIND_REGIME = {
@@ -926,6 +948,25 @@ SECTION_BLOCK = {
     "opportunities": "OPPORTUNITY ROW",
 }
 
+# Opportunity types with nothing to draft: an info session has no form, and a
+# program's sign-up is a registration, not an application to write.
+NO_DRAFT_TYPES = ("info-session", "program", "watch")
+
+
+def _draft_attr(item):
+    """Hides "Draft my application" on a row that has no application to draft."""
+    kind = ((item.get("opportunity") or {}).get("type") or "").lower()
+    return " data-no-draft hidden" if kind in NO_DRAFT_TYPES else ""
+
+
+def _source_label(url):
+    """An email-sourced opportunity links to its Gmail thread, not to an
+    application page, so the menu says what the link opens."""
+    if urlparse(str(url or "")).hostname == "mail.google.com":
+        return "Open the email"
+    return "Open the application page"
+
+
 # Menu items that are conditional, and the marker identifying their line.
 # Everything not listed here is unconditional for its section.
 _CONDITIONAL = (
@@ -943,11 +984,12 @@ _CONDITIONAL = (
     ("source-link", "source_url"),
     ("{{OPP_META}}", "opp_meta"),
     ("{{INELIGIBLE_NOTE}}", "ineligible_note"),
+    ("draft-link", "draft_url"),
     ("{{DOSSIER_HTML}}", "dossier_html"),
     ("<b>To confirm:</b>", "confirm_action"),
     ("<b>Drop it if:</b>", "kill_criteria"),
 )
-_AI_TASKS = ("steps", "study", "email")
+_AI_TASKS = ("steps", "study", "email", "draft")
 
 # §15. Which sections hold rows a "Worth showing?" question is meaningful on.
 # The template's own CSS has said "only on suggested rows — coursework is not a
@@ -1061,6 +1103,12 @@ def dossier_html(d):
     if d.get("summary") and d.get("relevant") is False:
         parts.append('<p class="dos-note">The linked page did not describe '
                      'this opportunity; details are from the email.</p>')
+    if d.get("why_it_fits"):
+        parts.append('<p class="dos-fit"><span class="dos-label">Claude\u2019s '
+                     'read</span> %s</p>' % esc(d["why_it_fits"]))
+    # The quoted facts and their source are the bulk of a card and repeat its
+    # meta line (deadline, eligibility), so they sit behind a disclosure.
+    quoted = []
     facts = []
     for key, label in _DOSSIER_FACTS:
         v = d.get(key)
@@ -1073,21 +1121,24 @@ def dossier_html(d):
         if shown:
             facts.append("<div><dt>%s</dt><dd>%s</dd></div>" % (esc(label), shown))
     if facts:
-        parts.append('<dl class="dos-facts">%s</dl>' % "".join(facts))
-    if d.get("why_it_fits"):
-        parts.append('<p class="dos-fit"><span class="dos-label">Claude\u2019s '
-                     'read</span> %s</p>' % esc(d["why_it_fits"]))
+        quoted.append('<dl class="dos-facts">%s</dl>' % "".join(facts))
     url = str(d.get("source_url") or "")
     on = _as_date(d.get("researched_on"))
     if d.get("from_email") and d.get("summary"):
-        parts.append('<p class="dos-src">Quotes checked against the original '
-                     'email%s</p>' % ((" \u00b7 %s" % esc(_dow_md(on))) if on else ""))
+        quoted.append('<p class="dos-src">Quotes checked against the original '
+                      'email%s</p>' % ((" \u00b7 %s" % esc(_dow_md(on))) if on else ""))
     elif url.startswith("https://") and d.get("summary"):
         host = urlparse(url).netloc.replace("www.", "")
-        parts.append('<p class="dos-src">Quotes checked against '
-                     '<a href="%s" target="_blank" rel="noopener">%s</a>%s</p>'
-                     % (esc(url), esc(host),
-                        (" \u00b7 %s" % esc(_dow_md(on))) if on else ""))
+        quoted.append('<p class="dos-src">Quotes checked against '
+                      '<a href="%s" target="_blank" rel="noopener">%s</a>%s</p>'
+                      % (esc(url), esc(host),
+                         (" \u00b7 %s" % esc(_dow_md(on))) if on else ""))
+    if not quoted:
+        return "".join(parts)
+    parts.append('<details class="more dos-more"><summary>'
+                 '<span class="more-open">Show quoted facts</span>'
+                 '<span class="more-shut">Hide quoted facts</span></summary>'
+                 '%s</details>' % "".join(quoted))
     return "".join(parts)
 
 
@@ -1111,6 +1162,12 @@ def _build_row(template, section, item):
     if not (section in RATEABLE_SECTIONS or item.get("rateable")):
         tpl = _drop_block(tpl, 'class="menu-rate"')
 
+    # "Not for me" on a Coming-up row is for events only: coursework is
+    # marked done, never dismissed.
+    if SECTION_BLOCK[section] == "COMING-UP ROW" \
+            and item.get("kind") not in ("event", "advising"):
+        tpl = _drop_line(tpl, 'data-action="dismiss"')
+
     # §10 / §5.6: the due flag and the days-out are ONE slot inside .row-meta,
     # and exactly one of them renders (gate check 28).
     tpl = resolve_meta_slot(tpl, item.get("due_flag_text"))
@@ -1123,6 +1180,8 @@ def _build_row(template, section, item):
     # render an empty one).
     if not item.get("action_tag"):
         tpl = _drop_span(tpl, "action-tag")
+    if not item.get("app_stage_label"):
+        tpl = _drop_span(tpl, "app-stage")
 
     # Optional elements: delete the whole line, never render it empty (§10).
     for marker, key in _CONDITIONAL:
@@ -1223,8 +1282,15 @@ def _build_row(template, section, item):
         "KILL_CRITERIA": item.get("kill_criteria", ""),
         "ACT_BY_LINE": item.get("act_by_line", ""),
         "SOURCE_URL": item.get("source_url", ""),
+        "SOURCE_LABEL": _source_label(item.get("source_url", "")),
         "OPP_META": item.get("opp_meta", ""),
         "INELIGIBLE_NOTE": item.get("ineligible_note", ""),
+        "APP_STAGE": item.get("app_stage", ""),
+        "APP_STAGE_LABEL": item.get("app_stage_label", ""),
+        "APP_PRIOR_STAGE": item.get("app_prior_stage", ""),
+        "DRAFT_URL": item.get("draft_url", ""),
+        "DRAFT_ATTR": _draft_attr(item),
+        "APP_FOLLOW_UP": item.get("app_follow_up", ""),
     })
 
 # The pipeline bucket -> the data-kind stamped on its rows.
@@ -1237,6 +1303,7 @@ SECTION_KIND = {
     "attention_more": "attention",
     "campus": "campus",
     "leads": "lead",
+    "leads_more": "lead",
     "opportunities": "opportunity",
 }
 
@@ -1461,12 +1528,85 @@ def _title_key(title):
     return " ".join(re.findall(r"[a-z0-9]+", str(title or "").lower()))
 
 
-def _build_schedule(entries, extras=()):
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep",
+           "oct", "nov", "dec")
+_DUE_IN_TITLE = re.compile(
+    r"\bdue\s+(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?"
+    r"(?P<mon>%s)[a-z]*\.?\s+(?P<day>\d{1,2})(?:st|nd|rd|th)?\b" % "|".join(_MONTHS),
+    re.I)
+
+
+def shown_title(title, date=None):
+    """The title as the page, the headline and the pushes show it. ENGL001
+    names every weekly task "W6 Homework Due October 20 / Critical Issues
+    Grid", so the headline read "... Due October 20 / Critical Issues Grid on
+    Tuesday" beside a row that already says 10/20. A "Due <date>" that matches
+    the item's own date is dropped; any other date stays, since it then says
+    something the row does not. Stored titles are never changed."""
+    title = str(title or "")
+    d = _as_date(date)
+    m = _DUE_IN_TITLE.search(title)
+    if d is None or not m or (_MONTHS.index(m["mon"][:3].lower()) + 1,
+                              int(m["day"])) != (d.month, d.day):
+        return title
+    head = title[:m.start()].rstrip(" -–—:,(")
+    tail = title[m.end():].lstrip(" )")
+    joiner = " "
+    if tail.startswith("/"):
+        tail, joiner = tail[1:].lstrip(), " / "
+    elif tail[:1] in ("-", "–", "—", ":", ","):
+        tail, joiner = tail[1:].lstrip(), ": "
+    return joiner.join(p for p in (head, tail) if p) or title
+
+
+DEFAULT_EVENT_MINUTES = 60
+
+
+def _span(e):
+    """(start, end) minutes for a timed entry; end falls back to an hour."""
+    start = _minutes(e.get("time"))
+    if start is None:
+        return None
+    end = _minutes(e.get("end_time"))
+    if end is None or end <= start:
+        end = start + DEFAULT_EVENT_MINUTES
+    return start, end
+
+
+def _conflicts_with(extra, entries):
+    """A suggested event never goes on the calendar over an existing one."""
+    span = _span(extra)
+    if span is None:
+        return False
+    for e in entries:
+        other = None if "gap" in e else _span(e)
+        if other and span[0] < other[1] and other[0] < span[1]:
+            return True
+    return False
+
+
+def _ends_attr(today, mins):
+    """data-ends: the moment a calendar row is over, so the page can grey
+    out what has already happened. The page is built at 6:30 and rebuilt
+    through the day, and read hours later (2026-10-02: at 2:30 PM the 12:40
+    and 1:00 PM rows still read as what's next)."""
+    if today is None or mins is None:
+        return ""
+    mins = min(mins, 24 * 60 - 1)
+    at = _dt.datetime.combine(today, _dt.time(mins // 60, mins % 60),
+                              tzinfo=_ET)
+    return ' data-ends="%s"' % at.isoformat()
+
+
+def _build_schedule(entries, extras=(), today=None):
     """Today's calendar, with today's events from email/campus (`extras`,
     already shaped like timeline entries) slotted in by time. An event is a
-    time on the day, not a deadline, so it lives here, not in Due cards."""
+    time on the day, not a deadline, so it lives here, not in Due cards.
+    With `today`, each timed row says when it ends (`_ends_attr`); a
+    travel-gap note ends when the event after it starts."""
     listed = {_title_key(e.get("title")) for e in entries if "gap" not in e}
-    extras = [x for x in extras if _title_key(x.get("title")) not in listed]
+    extras = [x for x in extras if _title_key(x.get("title")) not in listed
+              and not _conflicts_with(x, entries)]
     timed = [e for e in entries]
     for x in extras:
         m = _minutes(x.get("time"))
@@ -1478,30 +1618,59 @@ def _build_schedule(entries, extras=()):
                 break
         timed.insert(pos, x)
     out = []
-    for e in timed:
+    for n, e in enumerate(timed):
         if "gap" in e:
             if e.get("tight"):
-                out.append('<div class="t-row"><span class="t-time"></span>'
-                           '<p class="t-note tight">%s</p></div>' % esc(_gap_text(e["gap"])))
+                nxt = next((_minutes(x.get("time")) for x in timed[n + 1:]
+                            if "gap" not in x), None)
+                out.append('<div class="t-row t-gap"%s><span class="t-time"></span>'
+                           '<p class="t-note tight">%s</p></div>'
+                           % (_ends_attr(today, nxt), esc(_gap_text(e["gap"]))))
             continue
         place = place_name(e.get("location"))
         loc = ('<p class="t-sub">%s</p>' % esc(place)) if place else ""
         tag = _tag(e) if e.get("course_label") not in (None, "", "Personal") else ""
         title = esc(e.get("title", ""))
+        if e.get("canceled"):
+            title = esc(re.sub(r"^\s*cancell?ed:?\s*", "", e.get("title", ""),
+                               flags=re.I)) \
+                + '<span class="t-canceled">Canceled</span>'
         if str(e.get("url") or "").startswith("https://"):
             title = '<a class="t-link" href="%s" target="_blank" rel="noopener">%s</a>' % (
                 esc(e["url"]), title)
         cell = (_time_cell(_minutes(e.get("time"))) if _minutes(e.get("time")) is not None
                 else '<span class="t-time">All day</span>')
         seen = (' data-seen="%s"' % esc(e["first_seen"])) if e.get("first_seen") else ""
-        out.append('<div class="t-row%s"%s>%s<div><p class="t-title">%s%s</p>%s</div></div>'
-                   % (" is-extra" if e.get("url") is not None else "", seen, cell, tag,
-                      title, loc))
+        if e.get("suggested_why") is not None:
+            loc += ('<p class="t-sub t-why">%s</p>'
+                    % esc("Suggested for you: " + e["suggested_why"]))
+            title += '<span class="t-suggest">Suggested</span>'
+        span = _span(e)
+        ends = _ends_attr(today, span[1]) if span else ""
+        out.append('<div class="t-row%s"%s%s>%s<div><p class="t-title">%s%s</p>%s</div></div>'
+                   % (" is-suggested" if e.get("suggested_why") is not None
+                      else " is-canceled" if e.get("canceled") else "",
+                      seen, ends, cell, tag, title, loc))
     return "\n".join(out)
 
 
+MAX_SUGGESTED_CAMPUS = 3
+
+
+def _suggestion_why(item):
+    """Why a not-on-my-calendar event earns a slot on today's calendar: the
+    pipeline's own relevance verdict (campus / Handshake scoring). "" when it
+    found none -- a digest mention or a bare email is not interest."""
+    rel = item.get("relevance") or {}
+    if rel.get("evidence") == "include" and (rel.get("score") or 0) > 0:
+        why = str(rel.get("why") or "")
+        return why.replace("Why you're seeing this: ", "").strip(" .") or "matches your interests"
+    return ""
+
+
 def _as_schedule_entry(item):
-    return {"time": item.get("time"), "title": item.get("title", ""),
+    return {"suggested_why": _suggestion_why(item), "time": item.get("time"),
+            "end_time": item.get("end_time"), "title": item.get("title", ""),
             "location": item.get("location") or "",
             "course_class": item.get("course_class") or "none",
             "course_label": item.get("course_label") or "UMD",
@@ -1573,6 +1742,7 @@ def _standing_row(template, item, bucket):
         "COURSE_CLASS": item.get("course_class", "none"),
         "COURSE_LABEL": item.get("course_label", "UMD"),
         "TEXT": item.get("standing_text", ""),
+        "GRADE": item.get("standing_grade", ""),
         "WHEN": item.get("standing_when", ""),
         "CANVAS_URL": item.get("canvas_url", ""),
         "SOURCE_URL": item.get("source_url", ""),
@@ -1633,13 +1803,18 @@ def _build_standing(t, today, spec, placed):
         if grade_text:
             # Labelled: "Weekly SmartBook — 100% (6 of 45 graded)" read as
             # if that one upcoming item had scored 100%. The number is the
-            # COURSE's current grade, so it says so.
-            text = "%s · %s" % (text, (
-                "no grades posted yet" if grade_text.startswith("not yet graded")
-                else "course grade " + grade_text))
+            # COURSE's current grade, so it says so, on its own muted line
+            # under the item (2026-10-17; it was a " · " tail before).
+            # Only a score is "course grade ..."; 2026-10-02 printed
+            # "course grade 1 of 3 graded" for a course hiding its total.
+            grade_text = (
+                "No grades posted yet" if grade_text.startswith("not yet graded")
+                else "Course grade " + grade_text if "%" in grade_text
+                else grade_text[:1].upper() + grade_text[1:])
         if item.get("id") and not item.get("grouped"):
             shown = dict(item)
             shown["standing_text"] = text
+            shown["standing_grade"] = grade_text
             shown["standing_when"] = when
             lines.append(_standing_row(t, shown, bucket))
         else:
@@ -1651,9 +1826,12 @@ def _build_standing(t, today, spec, placed):
             # obligation happens to be a group.
             lines.append(
                 '<div class="tbl-row"><span class="course-tag %s">%s</span>'
-                '<p class="tbl-text">%s</p><span class="tbl-when">%s</span></div>'
+                '<p class="tbl-text"><span class="tbl-name">%s</span>'
+                '<span class="tbl-grade">%s</span></p>'
+                '<span class="tbl-when">%s</span></div>'
                 % (esc(item.get("course_class") or "none"),
-                   esc(item.get("course_label") or "UMD"), esc(text), esc(when)))
+                   esc(item.get("course_label") or "UMD"), esc(text),
+                   esc(grade_text), esc(when)))
     for note in spec.get("portfolio") or []:
         lines.append('<div class="tbl-row tbl-note">%s</div>' % esc(note))
     return "\n".join(lines)
@@ -1719,9 +1897,13 @@ def build(spec, template):
             d = _as_date(item.get("date"))
             if sec in ("coming_up", "coming_up_more") and \
                     item.get("kind") in ("event", "advising") and d == today:
-                # A talk or workshop today is a time on the day, not
-                # something due: it goes on the calendar, not in Due cards.
-                schedule_extras.append(_as_schedule_entry(item))
+                # A talk or workshop today is a time on the day, never
+                # something due: it must not render in Due cards. It goes on
+                # the calendar when the pipeline found a reason it suits
+                # Michael; an event with no such reason is just mail and is
+                # not shown today.
+                if _suggestion_why(item):
+                    schedule_extras.append(_as_schedule_entry(item))
                 continue
             remember(sec, item)
             placed.append((sec, item))
@@ -1731,7 +1913,8 @@ def build(spec, template):
                 today_rows.append((sec, item))
             else:
                 by_day.setdefault(d, []).append((sec, item))
-    for sec in ("attention", "attention_more", "campus", "leads", "opportunities"):
+    for sec in ("attention", "attention_more", "campus", "leads", "leads_more",
+                "opportunities"):
         for item in S.get(sec) or []:
             remember(sec, item)
 
@@ -1767,9 +1950,18 @@ def build(spec, template):
             _further_row(sec, item) for sec, item in further_secondary)
 
     campus = S.get("campus") or []
+    # The best-scoring timed campus events today are suggested on the
+    # calendar too (capped, so a Handshake-heavy day cannot flood it).
+    have = {_title_key(x.get("title")) for x in schedule_extras}
+    picks = sorted(
+        (i for i in campus if _as_date(i.get("date")) == today
+         and _minutes(i.get("time")) is not None and _suggestion_why(i)
+         and _title_key(i.get("title")) not in have),
+        key=lambda i: -((i.get("relevance") or {}).get("score") or 0))
+    schedule_extras += [_as_schedule_entry(i) for i in picks[:MAX_SUGGESTED_CAMPUS]]
     sections["campus"] = _build_campus(t, today, campus)
     sections["schedule"] = _build_schedule(spec.get("timeline") or [],
-                                           schedule_extras)
+                                           schedule_extras, today)
     sections["changes"] = _build_changes(spec.get("changes"), spec.get("courses"),
                                          today)
     def attention_row(section, item):
@@ -1786,6 +1978,8 @@ def build(spec, template):
     sections["attention_more"] = "\n".join(
         attention_row("attention_more", i) for i in S.get("attention_more") or [])
     sections["leads"] = "\n".join(build_row(t, "leads", i) for i in S.get("leads") or [])
+    sections["leads_more"] = "\n".join(
+        build_row(t, "leads", i) for i in S.get("leads_more") or [])
     sections["opportunities"] = "\n".join(
         build_row(t, "opportunities", i) for i in S.get("opportunities") or [])
     sections["standing"] = _build_standing(t, today, spec, placed)
@@ -1829,7 +2023,8 @@ def build(spec, template):
     ctx.setdefault("WEEKDAY_SHORT", str(ctx["WEEKDAY"]).strip(" ,")[:3])
     ctx.setdefault("TODAY_COUNT_LABEL", _plural(len(today_rows), "item"))
     ctx.setdefault("SCHEDULE_COUNT_LABEL", _plural(
-        sum(1 for e in spec.get("timeline") or [] if "gap" not in e)
+        sum(1 for e in spec.get("timeline") or []
+            if "gap" not in e and not e.get("canceled"))
         + len(schedule_extras), "event"))
     ctx.setdefault("CHANGES_RANGE", "since yesterday's brief")
     ctx.setdefault("OPPS_STAMP", "")
@@ -1847,7 +2042,10 @@ def build(spec, template):
     if further_secondary:
         ctx.setdefault("FURTHER_MORE_LABEL", "%s — informational, no action needed" % (
             _plural(len(further_secondary), "item")))
+    if S.get("leads_more"):
+        ctx.setdefault("LEADS_MORE_LABEL", _plural(len(S["leads_more"]), "more lead"))
     ctx.setdefault("RUN_SHORT", _md(today))
+    ctx.setdefault("BUILT_ON", today.isoformat())
     ctx.setdefault("WEEK_STAMP", "")
 
     html = render(t, ctx)

@@ -41,7 +41,7 @@ def line(item, disposition, on, family=None):
         "id": item.get("id"),
         "family": family or _family(item.get("id")),
         "kind": item.get("kind"),
-        "date": item.get("date"),
+        "date": _iso_date_or_none(item.get("date")),
         "source": _source_of(item),
         "requirement_ids": list(item.get("requirement_ids") or ()),
         "disposition": disposition,
@@ -88,6 +88,26 @@ def _iso(v):
     return str(v)[:10]
 
 
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def _iso_date_or_none(v):
+    """A row's `date` is a calendar date or absent. Lead items once carried
+    the model's prose ("Early February 2027 (exact date not stated)"), and
+    every reader of the ledger parses `date` as ISO -- one such row made
+    detect_recurrence() raise and took all of discovery down (2026-10-01)."""
+    if isinstance(v, (date, datetime)):
+        return _iso(v)
+    s = str(v or "").strip()[:10]
+    if not _ISO_DATE.match(s):
+        return None
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return s
+
+
 def serialize(rows):
     """The text to APPEND. Compact, one object per line, trailing newline —
     so a later append cannot corrupt the last record written."""
@@ -111,6 +131,10 @@ def parse(text):
         try:
             obj = json.loads(raw)
             if isinstance(obj, dict):
+                # A bad `date` costs that field, not the row: the row's
+                # disposition still counts for revealed preference.
+                if "date" in obj and _iso_date_or_none(obj["date"]) is None:
+                    obj.pop("date")
                 rows.append(obj)
             else:
                 bad += 1

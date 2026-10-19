@@ -17,10 +17,13 @@ Exposed over the tailnet with `tailscale serve` (see setup_tailscale_serve.sh)
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import sys
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -29,15 +32,28 @@ from pydantic import BaseModel, Field
 
 import db as dbmod
 import llm_cli
+import notify as notify_mod
+import sources as sources_mod
 import store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
+import applications as applications_mod  # noqa: E402
+import watches as watches_mod  # noqa: E402
 import feedback as feedback_mod  # noqa: E402 -- family_of()/organizer_of()
 import ledger as ledger_mod  # noqa: E402
+import drafting  # noqa: E402
+import state_io_sqlite  # noqa: E402
 
-app = FastAPI(title="UMD Daily Briefing (service)")
+@asynccontextmanager
+async def _lifespan(_app):
+    dbmod.init_db()
+    yield
+
+
+app = FastAPI(title="UMD Daily Briefing (service)", lifespan=_lifespan)
+_ET = ZoneInfo("America/New_York")
 
 
 @app.middleware("http")
@@ -67,11 +83,6 @@ _TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 def _render(name, **ctx):
     with open(os.path.join(_TEMPLATE_DIR, name), "r", encoding="utf-8") as fh:
         return _jinja_env.from_string(fh.read()).render(**ctx)
-
-
-@app.on_event("startup")
-def _ensure_db():
-    dbmod.init_db()
 
 
 def _wrap_page(content):
@@ -153,6 +164,42 @@ def _now_iso():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+UNDO_KEEP = 200
+
+
+def _record_action(conn, item_id, action, before_status, after_status,
+                   label=None, app=False, app_prior=None):
+    """Put one page action on the undo stack (POST /undo). `before_status` is
+    the item status it replaced, '' when the action left the item alone.
+    `app` marks an action that wrote an application record; `app_prior` is
+    that record before the write (None when there was none)."""
+    conn.execute("INSERT INTO actions (item_id, action, before_status, "
+                 "after_status, at, app_before, label) "
+                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                 (item_id, action, before_status, after_status, _now_iso(),
+                  json.dumps(app_prior) if app else None, label))
+    conn.execute("DELETE FROM actions WHERE id <= (SELECT MAX(id) FROM "
+                 "actions) - ?", (UNDO_KEEP,))
+
+
+def _set_status(conn, item_id, status, only_from=(), action=None):
+    """Write an item's disposition and stamp it. The stamp tells a run that is
+    still working on its copy of the item that the page changed it
+    (state_io_sqlite.save()). `only_from` limits the write to rows in those
+    statuses. `action` (a page action: done, dismissed, ...) also records the
+    status it replaced, so POST /undo can put it back."""
+    if action and not only_from:
+        before = conn.execute("SELECT status FROM items WHERE id = ?",
+                              (item_id,)).fetchone()[0]
+        _record_action(conn, item_id, action, before, status)
+    sql = "UPDATE items SET status = ?, status_changed_at = ? WHERE id = ?"
+    args = [status, store.stamp(), item_id]
+    if only_from:
+        sql += " AND status IN (%s)" % ",".join("?" * len(only_from))
+        args += list(only_from)
+    conn.execute(sql, args)
+
+
 _LEDGER_PATH = ledger_mod.default_path(os.path.dirname(dbmod.DEFAULT_DB_PATH))
 
 
@@ -189,8 +236,7 @@ def mark_done(item_id: str):
             raise HTTPException(
                 409, "%s is a %r, not an assignment -- no Done action "
                      "exists for it (§6.1)" % (item_id, row["kind"]))
-        conn.execute("UPDATE items SET status = 'handled' WHERE id = ?",
-                    (item_id,))
+        _set_status(conn, item_id, "handled", action="done")
         conn.execute(
             "INSERT INTO done_resolved (item_id, action, at) VALUES (?, "
             "'done', ?) ON CONFLICT(item_id, action) DO UPDATE SET at=excluded.at",
@@ -210,13 +256,103 @@ def dismiss_item(item_id: str):
     conn = dbmod.connect()
     try:
         row = _get_item(conn, item_id)
-        conn.execute("UPDATE items SET status = 'dismissed' WHERE id = ?",
-                     (item_id,))
+        _set_status(conn, item_id, "dismissed", action="dismissed")
         conn.commit()
     finally:
         conn.close()
     _ledger_write(row, "dismissed")
     return {"id": item_id, "status": "dismissed"}
+
+
+@app.post("/items/{item_id}/decided")
+def decided_item(item_id: str):
+    """His answer to a Selected or Offer row ("I accepted" / "I declined").
+    The row leaves the page, so this is `handled`, not `dismissed`: the
+    ledger reads a dismissal as "not for me", which a decision is not.
+    The page now sends the answer with its stage (set_application_stage);
+    this stays for a caller that answers without one."""
+    conn = dbmod.connect()
+    try:
+        row = _get_item(conn, item_id)
+        before = row["status"]
+        _set_status(conn, item_id, "handled")
+        _record_action(conn, item_id, "decided", before, "handled",
+                       label="Decided")
+        conn.commit()
+    finally:
+        conn.close()
+    _ledger_write(row, "handled")
+    return {"id": item_id, "status": "handled"}
+
+
+@app.post("/items/{item_id}/restore")
+def restore_item(item_id: str):
+    """Undo of a decision: the row returns to the page as new. Only a row
+    that is out of view (`handled` or `dismissed`) is restored; an open row
+    is left as it is. The ledger keeps its entry: it is append-only."""
+    conn = dbmod.connect()
+    try:
+        _get_item(conn, item_id)
+        _set_status(conn, item_id, "new", only_from=("handled", "dismissed"))
+        status = conn.execute("SELECT status FROM items WHERE id = ?",
+                              (item_id,)).fetchone()[0]
+        conn.commit()
+    finally:
+        conn.close()
+    return {"id": item_id, "status": status}
+
+
+@app.get("/undo")
+def latest_undo():
+    """The newest page action that can still be undone, or {} (for the page's
+    undo bar, which shows after a reload too)."""
+    conn = dbmod.connect()
+    try:
+        row = conn.execute(
+            "SELECT a.id, a.item_id, a.action, a.at, a.label, i.title "
+            "FROM actions a "
+            "LEFT JOIN items i ON i.id = a.item_id "
+            "WHERE a.undone_at IS NULL ORDER BY a.id DESC LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    return dict(row) if row else {}
+
+
+@app.post("/undo")
+def undo_last():
+    """Undo the newest page action not yet undone: the item and its application
+    go back to what they were. Undoing again goes one step further back. The
+    ledger keeps the original click (it is append-only)."""
+    conn = dbmod.connect()
+    try:
+        row = conn.execute(
+            "SELECT * FROM actions WHERE undone_at IS NULL "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+        if row is None:
+            raise HTTPException(404, "nothing to undo")
+        out = {"id": row["item_id"], "action": row["action"]}
+        if row["app_before"] is not None:
+            prior = json.loads(row["app_before"])
+            if prior is None:
+                conn.execute("DELETE FROM applications WHERE item_id = ?",
+                             (row["item_id"],))
+            else:
+                store.application_put(conn, row["item_id"], prior)
+            out["stage"] = (prior or {}).get("stage") or ""
+            out["follow_up_on"] = (prior or {}).get("follow_up_on") or ""
+        if row["before_status"]:
+            _get_item(conn, row["item_id"])
+            _set_status(conn, row["item_id"], row["before_status"])
+            if row["action"] in ("done", "resolved"):
+                conn.execute("DELETE FROM done_resolved WHERE item_id = ? AND "
+                             "action = ?", (row["item_id"], row["action"]))
+            out["status"] = row["before_status"]
+        conn.execute("UPDATE actions SET undone_at = ? WHERE id = ?",
+                     (_now_iso(), row["id"]))
+        conn.commit()
+    finally:
+        conn.close()
+    return out
 
 
 VISIT_SESSION_MINUTES = 30
@@ -251,8 +387,7 @@ def mark_resolved(item_id: str):
     conn = dbmod.connect()
     try:
         row = _get_item(conn, item_id)
-        conn.execute("UPDATE items SET status = 'dismissed' WHERE id = ?",
-                    (item_id,))
+        _set_status(conn, item_id, "dismissed", action="resolved")
         conn.execute(
             "INSERT INTO done_resolved (item_id, action, at) VALUES (?, "
             "'resolved', ?) ON CONFLICT(item_id, action) DO UPDATE SET at=excluded.at",
@@ -281,8 +416,7 @@ def lead_confirmed(item_id: str):
             raise HTTPException(
                 409, "%s is regime %r, not a lead -- no Confirmed action "
                      "exists for it (§14.1)" % (item_id, row["regime"]))
-        conn.execute("UPDATE items SET status = 'confirmed' WHERE id = ?",
-                    (item_id,))
+        _set_status(conn, item_id, "confirmed", action="confirmed")
         conn.commit()
     finally:
         conn.close()
@@ -303,8 +437,7 @@ def lead_killed(item_id: str):
             raise HTTPException(
                 409, "%s is regime %r, not a lead -- no Kill action exists "
                      "for it (§14.1)" % (item_id, row["regime"]))
-        conn.execute("UPDATE items SET status = 'killed' WHERE id = ?",
-                    (item_id,))
+        _set_status(conn, item_id, "killed", action="killed")
         conn.commit()
     finally:
         conn.close()
@@ -430,12 +563,13 @@ _AI_TASK_LABELS = {
     "steps": "Claude · suggested steps",
     "study": "Claude · suggested study plan",
     "email": "Claude · draft — read before sending",
+    "draft": "Claude · application draft — edit before submitting",
     "week": "Claude · suggested plan",
 }
-# §6.5's "quick" vs "default" model tier: email is prose Michael sends
-# as-is-or-lightly-edited, worth the stronger model; steps/study/week are
-# structural (a list, an order) and forgiving of the cheaper one.
-_AI_TASK_MODEL = {"steps": "haiku", "study": "haiku", "email": "sonnet"}
+# §6.5's "quick" vs "default" model tier. Since Haiku 5.5 (2026-10-08) every
+# task uses Haiku: it writes the email prose well enough and answers faster
+# at a twentieth of Sonnet's price. Keep the table so a task can be moved back.
+_AI_TASK_MODEL = {"steps": "haiku", "study": "haiku", "email": "haiku"}
 
 
 def _ai_fmt_time(hhmm):
@@ -549,7 +683,8 @@ _AI_TASK_PROMPTS = {
 # same defense-in-depth those two already have, not a re-derivation of that
 # whole per-item judgement (the `steps`/`substantial` flags a title alone
 # can't recover).
-_AI_TASK_KIND = {"steps": "assignment", "study": "assessment"}
+_AI_TASK_KIND = {"steps": "assignment", "study": "assessment",
+                 "draft": "opportunity"}
 
 
 class AiActionIn(BaseModel):
@@ -558,6 +693,8 @@ class AiActionIn(BaseModel):
 
 @app.post("/ai/{item_id}/{task}")
 def ai_action(item_id: str, task: str, body: AiActionIn = AiActionIn()):
+    if task == "draft":
+        return draft_application(item_id, body)
     if task not in _AI_TASK_PROMPTS:
         raise HTTPException(404, "unknown AI task: %r" % task)
     conn = dbmod.connect()
@@ -601,6 +738,244 @@ def ai_action(item_id: str, task: str, body: AiActionIn = AiActionIn()):
         """, (item_id, task, ctx_hash, text, _now_iso()))
         conn.commit()
         return {"answer": text, "saved": False, "label": _AI_TASK_LABELS[task]}
+    finally:
+        conn.close()
+
+
+def _et_today():
+    return datetime.now(_ET).date()
+
+
+def _opportunity_item(conn, item_id):
+    """The stored opportunity as the pipeline sees it (extra fields such as
+    its researched dossier included). 409 for any other kind. An
+    application added by hand is an item only after the next run; until
+    then it is built from what he typed."""
+    if conn.execute("SELECT 1 FROM items WHERE id = ?", (item_id,)
+                    ).fetchone() is None:
+        rec = _application(conn, item_id)
+        if rec and rec.get("manual"):
+            item = applications_mod.manual_item(item_id, rec["manual"],
+                                                _et_today())
+            return ({"id": item_id, "kind": "opportunity",
+                     "date": item["date"], "regime": "confirmed",
+                     "extra_json": "{}"}, item)
+    row = _get_item(conn, item_id)
+    if row["kind"] != "opportunity":
+        raise HTTPException(
+            409, "%s is a %r, not an opportunity" % (item_id, row["kind"]))
+    return row, state_io_sqlite._row_to_item(row)
+
+
+def _application(conn, item_id):
+    r = conn.execute("SELECT * FROM applications WHERE item_id = ?",
+                     (item_id,)).fetchone()
+    if r is None:
+        return None
+    return {"stage": r["stage"], "stage_on": r["stage_on"],
+            "follow_up_on": r["follow_up_on"], "draft_url": r["draft_url"],
+            "history": json.loads(r["history_json"] or "[]"),
+            "manual": json.loads(r["manual_json"]) if r["manual_json"]
+            else None}
+
+
+def _email_text(item):
+    """The opportunity's own announcement email, re-read (read-only)."""
+    tid = next((r.get("thread_id") for r in item.get("source_refs") or ()
+                if isinstance(r, dict) and r.get("source") == "gmail"
+                and r.get("thread_id")), None)
+    if not tid:
+        return ""
+    try:
+        import google_api
+        from orchestrator import thread_prompt_text
+        return thread_prompt_text(google_api.thread_bodies(tid))
+    except Exception as exc:  # noqa: BLE001 -- draft from the page alone
+        print("draft: email for %s not read: %s" % (item.get("id"), exc),
+              file=sys.stderr)
+        return ""
+
+
+def _prior_doc(url):
+    """The draft doc he has been editing (questions pasted from a form he
+    can open and this server cannot), so a Regenerate answers them."""
+    m = re.search(r"/document/d/([A-Za-z0-9_-]+)", str(url or ""))
+    if not m:
+        return ""
+    try:
+        import google_api
+        return google_api.doc_text(m.group(1))
+    except Exception as exc:  # noqa: BLE001 -- trashed or unshared: start over
+        print("draft: previous doc not read: %s" % exc, file=sys.stderr)
+        return ""
+
+
+def draft_application(item_id, body):
+    """"Draft my application": a Google Doc from the listing and the story
+    bank (drafting.py). Saved like every AI answer; Regenerate writes a new
+    doc. Drafting marks the opportunity as one he is applying to."""
+    conn = dbmod.connect()
+    try:
+        row, item = _opportunity_item(conn, item_id)
+        record = _application(conn, item_id)
+        page = drafting.page_text(item)
+        ctx = drafting.context(item, page, _email_text(item),
+                               _prior_doc((record or {}).get("draft_url")))
+        ctx_hash = hashlib.sha256(ctx.encode("utf-8")).hexdigest()
+        if not body.force:
+            cached = conn.execute(
+                "SELECT answer, context_hash FROM ai_answers "
+                "WHERE item_id = ? AND task = 'draft'", (item_id,)).fetchone()
+            if cached and cached["context_hash"] == ctx_hash:
+                return {"answer": cached["answer"], "saved": True,
+                        "label": _AI_TASK_LABELS["draft"],
+                        "stage": (record or {}).get("stage") or "",
+                        "draft_url": (record or {}).get("draft_url") or ""}
+
+        def _llm(prompt, system):
+            text, _env = llm_cli.call(prompt, system_prompt=system,
+                                      model="haiku", label="draft",
+                                      timeout=240)
+            return text
+
+        def _doc(name, html):
+            import google_api
+            folder = google_api.ensure_folder(drafting.DRAFTS_FOLDER)
+            return google_api.create_doc(folder, name, html)[1]
+
+        try:
+            answer, url = drafting.draft(item, ctx, _llm, _doc, _et_today())
+        except llm_cli.ClaudeCliError as exc:
+            raise HTTPException(502, "Couldn't write the draft: %s" % exc)
+        except Exception as exc:  # noqa: BLE001 -- Drive or story bank
+            raise HTTPException(502, "Couldn't save the draft: %s" % exc)
+
+        if not applications_mod.is_active(record):
+            record = applications_mod.transition(record, "applying",
+                                                 _et_today())
+        record["draft_url"] = url
+        prior = _application(conn, item_id)
+        store.application_put(conn, item_id, record)
+        _record_action(conn, item_id, "draft", "", "", label="Draft written",
+                       app=True, app_prior=prior)
+        conn.execute("""
+            INSERT INTO ai_answers (item_id, task, context_hash, answer, at)
+            VALUES (?, 'draft', ?, ?, ?)
+            ON CONFLICT(item_id, task) DO UPDATE SET
+                context_hash=excluded.context_hash, answer=excluded.answer,
+                at=excluded.at
+        """, (item_id, ctx_hash, answer, _now_iso()))
+        conn.commit()
+        return {"answer": answer, "saved": False,
+                "label": _AI_TASK_LABELS["draft"], "draft_url": url,
+                "stage": record["stage"]}
+    finally:
+        conn.close()
+
+
+class StageIn(BaseModel):
+    stage: Optional[str] = None
+    # ISO date; "" clears it. Absent leaves it alone.
+    follow_up_on: Optional[str] = None
+    # His answer to a Selected or Offer row: the item leaves the page in the
+    # same write, so one Undo reverses both.
+    decided: bool = False
+
+
+@app.post("/applications/{item_id}")
+def set_application_stage(item_id: str, body: StageIn):
+    """Where he stands on an opportunity (applications.py): a new stage,
+    a hand-set follow-up date, or both. Any stage may follow any other, so
+    a wrong click is fixed by clicking the right one. Submitting is
+    recorded in the ledger as `acted`."""
+    if body.stage is not None and body.stage not in applications_mod.STAGES:
+        raise HTTPException(422, "unknown stage %r" % body.stage)
+    conn = dbmod.connect()
+    try:
+        row, _item = _opportunity_item(conn, item_id)
+        prior = _application(conn, item_id)
+        record = prior
+        if body.stage is not None:
+            record = applications_mod.transition(record, body.stage,
+                                                 _et_today())
+        elif record is None:
+            raise HTTPException(409, "%s is not being tracked" % item_id)
+        if body.follow_up_on is not None:
+            try:
+                record = applications_mod.set_follow_up(
+                    record, body.follow_up_on or None)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc))
+        status_before = None
+        if body.decided:
+            found = conn.execute("SELECT status FROM items WHERE id = ?",
+                                 (item_id,)).fetchone()
+            status_before = found[0] if found else None
+            if status_before is not None:
+                _set_status(conn, item_id, "handled")
+        store.application_put(conn, item_id, record)
+        if body.stage is not None:
+            label = "Status: %s" % applications_mod.LABELS[body.stage]
+        else:
+            label = "Follow-up date changed"
+        _record_action(conn, item_id,
+                       "decided" if body.decided else "application",
+                       status_before or "", "handled" if body.decided else "",
+                       label=label, app=True, app_prior=prior)
+        conn.commit()
+    finally:
+        conn.close()
+    if body.stage == "submitted":
+        _ledger_write(row, "acted")
+    if body.decided:
+        _ledger_write(row, "handled")
+    return dict(record, id=item_id, label=label)
+
+
+class ManualIn(BaseModel):
+    title: str = Field(max_length=300)
+    organization: str = Field("", max_length=200)
+    url: str = Field("", max_length=2000)
+    deadline: str = Field("", max_length=40)
+    stage: str = Field("applying", max_length=40)
+
+
+@app.post("/applications")
+def add_application(body: ManualIn):
+    """"Track an application": one the brief never showed. Stored with what
+    he typed; the next run makes it an opportunity row (applications.py)."""
+    if body.stage not in applications_mod.ACTIVE:
+        raise HTTPException(422, "start at applying, submitted, interview "
+                                 "or offer")
+    try:
+        manual = applications_mod.clean_manual(
+            body.title, body.organization, body.url, body.deadline)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    today = _et_today()
+    item_id = applications_mod.manual_id(manual["title"], today)
+    record = dict(applications_mod.transition(None, body.stage, today),
+                  manual=manual)
+    conn = dbmod.connect()
+    try:
+        prior = _application(conn, item_id)
+        store.application_put(conn, item_id, record)
+        label = "Tracked: %s" % manual["title"]
+        _record_action(conn, item_id, "track", "", "", label=label,
+                       app=True, app_prior=prior)
+        conn.commit()
+    finally:
+        conn.close()
+    return dict(record, id=item_id, label=label)
+
+
+@app.get("/applications")
+def application_stages():
+    """{item_id: stage}: the page's same-day reload reads this."""
+    conn = dbmod.connect()
+    try:
+        return {r["item_id"]: r["stage"] for r in
+                conn.execute("SELECT item_id, stage FROM applications")}
     finally:
         conn.close()
 
@@ -694,14 +1069,16 @@ def ai_week(body: AiActionIn = AiActionIn()):
 # (§12.1: "the only reason that channel can be trusted is that nothing else
 # can write to it"). orchestrator.py never imports or calls these.
 
+# The stored value is replaced, so the field that carries it is required: a
+# body without it is refused (422) rather than saved as empty.
 class QuizBody(BaseModel):
     version: int = 1
-    answers: dict = Field(default_factory=dict)
+    answers: dict
 
 
 class CustomBody(BaseModel):
     version: int = 1
-    text: str = ""
+    text: str = Field(max_length=20000)
 
 
 class RequirementIn(BaseModel):
@@ -715,6 +1092,18 @@ class RequirementIn(BaseModel):
 
 class RequirementsBody(BaseModel):
     entries: list[RequirementIn]
+
+
+class WatchIn(BaseModel):
+    id: str
+    what: str = ""
+    urls: list[str] = []
+    active: bool = True
+
+
+class WatchesBody(BaseModel):
+    version: int = 1
+    entries: list[WatchIn]
 
 
 @app.get("/prefs/quiz")
@@ -735,6 +1124,34 @@ def get_custom():
 @app.put("/prefs/custom")
 def put_custom(body: CustomBody):
     return _put_pref_doc("custom", body.model_dump())
+
+
+@app.get("/watch-hits")
+def get_watch_hits():
+    """Confirmed things-to-watch hits for the page's "Things watching" section."""
+    return {"hits": store.watch_hits(dbmod.DEFAULT_DB_PATH)}
+
+
+@app.get("/prefs/watches")
+def get_watches():
+    return store.kv_get(dbmod.DEFAULT_DB_PATH, watches_mod.STORE_KEY) or {
+        "version": 1, "entries": []}
+
+
+@app.put("/prefs/watches")
+def put_watches(body: WatchesBody):
+    """Things to watch (service/watches.py). Validated whole: one bad row
+    refuses the save, so the stored list is always one the run can read."""
+    try:
+        entries = watches_mod.clean_entries(
+            [e.model_dump() for e in body.entries])
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    stored = store.kv_get(dbmod.DEFAULT_DB_PATH, watches_mod.STORE_KEY) or {}
+    entries = watches_mod.keep_checked(entries, stored.get("entries"))
+    doc = {"version": 1, "entries": entries, "updated_at": _now_iso()}
+    store.kv_set(dbmod.DEFAULT_DB_PATH, watches_mod.STORE_KEY, doc)
+    return doc
 
 
 def _get_pref_doc(doc_id, default):
@@ -792,7 +1209,7 @@ def put_requirements(body: RequirementsBody):
     list each time, not a diff."""
     conn = dbmod.connect()
     try:
-        conn.execute("BEGIN")
+        conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM requirements")
         for req in body.entries:
             conn.execute("""
@@ -802,6 +1219,12 @@ def put_requirements(body: RequirementsBody):
             """, (req.id, req.statement, req.horizon_days,
                  json.dumps(req.keywords), int(req.active),
                  req.quiet_after_days))
+        # Stamp the edit, so a run that loaded earlier adopts it rather than
+        # writing its copy back over it (state_io_sqlite.save()).
+        conn.execute("INSERT OR IGNORE INTO meta (id) VALUES (1)")
+        conn.execute("UPDATE meta SET requirements_synced_at = ?, "
+                     "requirements_version = COALESCE(requirements_version, 1) "
+                     "+ 1 WHERE id = 1", (store.stamp(),))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -809,3 +1232,116 @@ def put_requirements(body: RequirementsBody):
     finally:
         conn.close()
     return get_requirements()
+
+
+# --- Sources sheet (2026-09-29): what feeds the brief, how often, on/off ----
+#
+# Settings are written only from here (the page); last-run status is what
+# the runs recorded (sources.py).
+
+class SourceSetting(BaseModel):
+    enabled: bool = True
+    interval_hours: int = 24
+
+
+class SourcesBody(BaseModel):
+    settings: dict[str, SourceSetting]
+
+
+@app.get("/sources")
+def get_sources():
+    settings = sources_mod.load_settings()
+    status = sources_mod.load_status()
+    now = datetime.now(_ET)
+    built = sources_mod.built_today(dbmod.DEFAULT_DB_PATH, now)
+    rows = []
+    for name, meta in sources_mod.SOURCES.items():
+        st = status.get(name) or {}
+        nxt = sources_mod.next_fetch(name, settings[name], st, now, built)
+        rows.append({
+            "name": name, "label": meta["label"], "kind": meta["kind"],
+            "feeds": meta["feeds"], **settings[name],
+            "last_success": st.get("last_success"),
+            "last_attempt": st.get("last_attempt"),
+            "ok": st.get("ok"), "error": st.get("error"),
+            "detail": st.get("detail"),
+            "next_due": nxt.isoformat(timespec="minutes") if nxt else None,
+        })
+    return {"sources": rows, "intervals": list(sources_mod.INTERVALS)}
+
+
+@app.put("/sources")
+def put_sources(body: SourcesBody):
+    unknown = set(body.settings) - set(sources_mod.SOURCES)
+    bad = [n for n, s in body.settings.items()
+           if s.interval_hours not in sources_mod.INTERVALS]
+    if unknown or bad:
+        raise HTTPException(422, "unknown source(s) %s or interval(s) for %s"
+                            % (sorted(unknown), bad))
+    merged = sources_mod.load_settings()
+    merged.update({n: s.model_dump() for n, s in body.settings.items()})
+    sources_mod.save_settings(dbmod.DEFAULT_DB_PATH, merged)
+    return get_sources()
+
+
+# --- app notifications (notify.py) ------------------------------------------
+
+class NotifySettingsBody(BaseModel):
+    kinds: dict[str, bool]
+    quiet: list[str] = Field(default_factory=lambda: ["22:00", "07:00"])
+    cap: int = 6
+
+
+@app.get("/notify/settings")
+def get_notify_settings():
+    return {**notify_mod.load_settings(dbmod.DEFAULT_DB_PATH),
+            "labels": notify_mod.KIND_LABEL}
+
+
+@app.put("/notify/settings")
+def put_notify_settings(body: NotifySettingsBody):
+    bad = set(body.kinds) - set(notify_mod.KINDS)
+    if bad or len(body.quiet) != 2 or not all(
+            notify_mod._hhmm(q) for q in body.quiet) \
+            or not 1 <= body.cap <= 30:
+        raise HTTPException(422, "bad notification settings")
+    notify_mod.save_settings(dbmod.DEFAULT_DB_PATH, body.model_dump())
+    return get_notify_settings()
+
+
+@app.get("/api/notifications")
+def api_notifications(since: int = 0, limit: int = 100):
+    """Full-content events for the Mac app (tailnet-only traffic)."""
+    conn = dbmod.connect()
+    try:
+        rows = conn.execute(
+            "SELECT seq, key, kind, item_id, title, body, priority, "
+            "created_at, expires_at, read_at FROM notifications "
+            "WHERE seq > ? ORDER BY seq LIMIT ?",
+            (since, max(1, min(limit, 500)))).fetchall()
+    finally:
+        conn.close()
+    return {"events": [dict(r) for r in rows],
+            "settings": notify_mod.load_settings(dbmod.DEFAULT_DB_PATH)}
+
+
+@app.get("/api/glance")
+def api_glance():
+    conn = dbmod.connect()
+    try:
+        return notify_mod.glance(conn, datetime.now(_ET))
+    finally:
+        conn.close()
+
+
+@app.post("/api/notifications/{key}/read")
+def api_notification_read(key: str):
+    conn = dbmod.connect()
+    try:
+        conn.execute("UPDATE notifications SET read_at = ? WHERE key = ? "
+                     "AND read_at IS NULL",
+                     (datetime.now(_ET).isoformat(timespec="seconds"), key))
+        conn.commit()
+    finally:
+        conn.close()
+    return {"ok": True}

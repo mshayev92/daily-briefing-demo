@@ -87,6 +87,9 @@ CREATE TABLE IF NOT EXISTS items (
     kill_criteria      TEXT,
     confidence         TEXT,
     status             TEXT NOT NULL DEFAULT 'new',
+    -- When the page last wrote `status` (store.stamp()). save() uses it to
+    -- keep a page edit made while a run held a stale copy of the item.
+    status_changed_at  TEXT,
     times_surfaced     INTEGER NOT NULL DEFAULT 0,
     last_shown         TEXT,
     snooze_until       TEXT,
@@ -147,24 +150,6 @@ CREATE TABLE IF NOT EXISTS done_resolved (
     PRIMARY KEY (item_id, action)
 );
 
--- §3.7's ledger, as rows instead of a JSONL file. Append-only: rows are
--- INSERTed and never UPDATEd or DELETEd, matching the original file's
--- guarantee for the same reason (a partial rewrite must never be able to
--- destroy history).
-CREATE TABLE IF NOT EXISTS ledger (
-    seq                 INTEGER PRIMARY KEY AUTOINCREMENT,
-    item_id             TEXT,
-    family              TEXT,
-    kind                TEXT,
-    date                TEXT,
-    source              TEXT,
-    requirement_ids_json TEXT NOT NULL DEFAULT '[]',
-    disposition         TEXT NOT NULL,
-    on_date             TEXT NOT NULL,
-    regime              TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_ledger_family ON ledger(family);
-
 -- last_run_stats[], as rows instead of a capped array. Keep the newest 7 at
 -- read time (state_io_sqlite.py), matching run_stats.prepend(keep=7); rows
 -- older than that are pruned at write time rather than carried forever.
@@ -219,7 +204,7 @@ CREATE TABLE IF NOT EXISTS plan_my_week (
 -- Canvas read actually succeeded that run -- a failed/stale read simply
 -- inserts nothing, so the most recent row is always the most recent
 -- GENUINE observation, never a synthetic placeholder. Append-only, like
--- `ledger`: rows are never UPDATEd or DELETEd, so a later Canvas
+-- the JSONL ledger (ledger.py): rows are never UPDATEd or DELETEd, so a later Canvas
 -- recalculation (assignment added/removed/reweighted) shows up as a new,
 -- honestly-dated data point rather than erasing what was true before.
 -- Read/written by service/grades.py + orchestrator.py's grades step via
@@ -244,7 +229,10 @@ CREATE TABLE IF NOT EXISTS course_grade_snapshots (
     graded_count     INTEGER NOT NULL DEFAULT 0,  -- gradable items with a posted grade
     gradable_count   INTEGER NOT NULL DEFAULT 0,  -- published, points_possible > 0
     missing_count    INTEGER NOT NULL DEFAULT 0,  -- Canvas's own `missing` flag, never inferred
-    source           TEXT NOT NULL DEFAULT 'canvas_scraper'
+    source           TEXT NOT NULL DEFAULT 'canvas_scraper',
+    -- 2026-10-17: JSON [[name, score, points], ...] of the graded items, so a
+    -- grade push can name what was graded. NULL in older rows.
+    graded_items     TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_course_grade_snapshots_course
     ON course_grade_snapshots(course_label, captured_at);
@@ -286,3 +274,78 @@ CREATE TABLE IF NOT EXISTS llm_calls (
     seconds            REAL
 );
 CREATE INDEX IF NOT EXISTS idx_llm_calls_run ON llm_calls(run_start);
+
+-- 2026-09-25. Where Michael stands on each opportunity he is pursuing
+-- (applications.py owns the stages). Written ONLY by the page
+-- (POST /applications/{id}, and the Draft action's doc link); the run reads
+-- it and never writes it, like `feedback` -- so a click made while a run is
+-- in flight is never overwritten. No foreign key to items: a tracked row
+-- outlives the item's normal pruning (lifecycle keeps active ones), and a
+-- closed one may outlive the item harmlessly.
+CREATE TABLE IF NOT EXISTS applications (
+    item_id       TEXT PRIMARY KEY,
+    stage         TEXT NOT NULL,
+    stage_on      TEXT NOT NULL,
+    follow_up_on  TEXT,
+    draft_url     TEXT,
+    history_json  TEXT NOT NULL DEFAULT '[]',
+    updated_at    TEXT NOT NULL,
+    -- An application added by hand from the page (the brief never showed
+    -- it): {title, organization, url, deadline}. NULL for the rest.
+    manual_json   TEXT
+);
+
+-- 2026-09-29 (app notifications). Every event notify.py decided is worth
+-- telling Michael about. The primary key is the dedup ledger (an event is
+-- recorded once, ever); the rowid is the cursor the Mac app polls with.
+-- pushed_at: sent to the phone through ntfy (NULL = held or not sent).
+-- read_at: opened in an app. expires_at: a held event that is stale by
+-- release time is dropped rather than pushed.
+CREATE TABLE IF NOT EXISTS notifications (
+    seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+    key         TEXT NOT NULL UNIQUE,
+    kind        TEXT NOT NULL,
+    item_id     TEXT,
+    title       TEXT NOT NULL,
+    body        TEXT NOT NULL,
+    priority    TEXT NOT NULL DEFAULT 'default',
+    created_at  TEXT NOT NULL,
+    expires_at  TEXT,
+    pushed_at   TEXT,
+    read_at     TEXT
+);
+
+-- 2026-10-10 (things to watch). A confirmed hit on a watch: its own section on
+-- the page, not an opportunity row. One row per watch item (item_id is
+-- watch-<id>[-<item slug>]). The run keeps a row while its item still meets
+-- the watch and removes it when it no longer does or the watch is paused or
+-- removed. found_on: first day it met the watch.
+CREATE TABLE IF NOT EXISTS watch_hits (
+    item_id     TEXT PRIMARY KEY,
+    watch_id    TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    finding     TEXT NOT NULL,
+    url         TEXT NOT NULL DEFAULT '',
+    seen_on     TEXT NOT NULL DEFAULT 'page',
+    found_on    TEXT NOT NULL,
+    checked_on  TEXT NOT NULL
+);
+
+-- 2026-10-10 (undo). One row per page action that changed an item's status,
+-- with the status it replaced. POST /undo puts the newest row not yet undone
+-- back to before_status; undone_at marks it. Pruned to the newest 200.
+CREATE TABLE IF NOT EXISTS actions (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    item_id       TEXT NOT NULL,
+    action        TEXT NOT NULL,
+    before_status TEXT NOT NULL,
+    after_status  TEXT NOT NULL,
+    at            TEXT NOT NULL,
+    undone_at     TEXT,
+    -- An application write (stage, follow-up date, track, draft): the
+    -- applications record it replaced, JSON; 'null' when there was none.
+    -- NULL for an action that did not touch the application.
+    app_before    TEXT,
+    -- The words the undo bar shows ("Status: Applying").
+    label         TEXT
+);

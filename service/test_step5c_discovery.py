@@ -23,6 +23,7 @@ TODAY = _dt.date(2026, 9, 19)
 def _run(tmp_path, dry_run=False):
     run = orchestrator.Run(db_path=str(tmp_path / "briefing.db"),
                            dry_run=dry_run)
+    orchestrator.dbmod.init_db(run.db_path)
     return run
 
 
@@ -97,6 +98,34 @@ class TestRecurrenceOnly:
         out = orchestrator.step5c_discovery(run, _ctx([]))
         assert len(out) == 1
         assert out[0]["confidence_tier"] == "inferred"
+
+    def test_a_prose_date_in_an_old_ledger_row_does_not_sink_discovery(
+            self, tmp_path, monkeypatch):
+        # 2026-10-01..02: one 09-25 row dated "Early February 2027 (...)"
+        # made detect_recurrence() raise on every run.
+        monkeypatch.setattr(orchestrator.llm_cli, "call_with_tools",
+                            lambda *a, **k: (_ for _ in ()).throw(
+                                AssertionError("no requirements active")))
+        run = _run(tmp_path)
+        good = "lead-computing-catalyst-sprinternship-abcdef0123"
+        with open(run.ledger_path, "a") as fh:
+            fh.write('{"date":"Early February 2027 (exact date not stated)",'
+                     '"disposition":"surfaced","family":"lead-x","id":"lead-x",'
+                     '"kind":"lead","on":"2026-09-18","regime":"lead"}\n')
+        ledger.append(run.ledger_path, [
+            {"id": good, "family": good, "kind": "lead", "date": "2025-09-25",
+             "regime": "lead", "disposition": "surfaced", "on": "2025-09-25"}])
+        out = orchestrator.step5c_discovery(run, _ctx([]))
+        assert [it["regime"] for it in out] == ["lead"]
+        assert not [e for e in run.errors if e["source"] == "step5c"]
+
+    def test_ledger_line_never_writes_a_prose_date(self):
+        row = ledger.line({"id": "lead-x", "date": "Early February 2027"},
+                          "surfaced", on=TODAY)
+        assert "date" not in row
+        row = ledger.line({"id": "lead-x", "date": "2027-02-01"},
+                          "surfaced", on=TODAY)
+        assert row["date"] == "2027-02-01"
 
     def test_a_family_outside_the_recurrence_window_does_not_surface(self, tmp_path, monkeypatch):
         monkeypatch.setattr(orchestrator.llm_cli, "call_with_tools",

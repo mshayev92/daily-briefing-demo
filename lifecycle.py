@@ -33,8 +33,10 @@ would be re-opening a decision that is already settled.
 """
 
 import re
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
+import applications
 import opportunity
 import render_briefing
 
@@ -167,7 +169,37 @@ def sync_canvas_completion(items):
 _IN_PERSON_SUBMISSION_TYPES = frozenset(("none", "on_paper", "not_graded"))
 
 
-def overdue_is_actionable(item):
+_ET = ZoneInfo("America/New_York")
+
+
+def _read_before_due(item, sub):
+    """True when Canvas's record was scraped before the item's due time, so
+    "unsubmitted" only means "not yet" (2026-09-24: an expired Canvas login
+    failed the morning refresh, and work handed in on time the evening
+    before was reported missed from the previous morning's scrape)."""
+    as_of, due = sub.get("as_of"), as_date(item.get("date"))
+    if not as_of or due is None:
+        return False
+    try:
+        seen = datetime.fromisoformat(str(as_of).replace("Z", "+00:00"))
+        hh, mm = str(item.get("time") or "23:59").split(":")[:2]
+    except ValueError:
+        return False
+    if seen.tzinfo is None:
+        return False
+    due_at = datetime(due.year, due.month, due.day, int(hh), int(mm),
+                      tzinfo=_ET)
+    return seen < due_at
+
+
+def canvas_courses(items):
+    """Courses canvas-scraper covers: any item there carries Canvas's own
+    submission record."""
+    return {it.get("course") for it in items
+            if it.get("canvas_submission") is not None and it.get("course")}
+
+
+def overdue_is_actionable(item, covered=frozenset()):
     """Would "may have been missed" be TRUE and USEFUL for this item?
 
     The 2026-09-19 audit found every row in the real Needs-your-attention
@@ -177,28 +209,42 @@ def overdue_is_actionable(item):
     1. Canvas says `missing` -- always actionable (Canvas's own verdict).
     2. Canvas holds a submission/grade -- never (sync_canvas_completion()
        normally closes these first; this is the belt to its braces).
-    3. Worth 0 points -- an optional item cannot be "missed".
-    4. Canvas says there is nothing to submit (`none`/`on_paper`) -- it
-       happened in class; nothing to catch up on after the fact.
-    5. An assessment with no Canvas verdict -- a quiz/exam is taken in the
+    3. Canvas's record was read before the due time -- not yet knowable.
+    4. Worth 0 points -- an optional item cannot be "missed".
+    5. Canvas says there is nothing to submit (`none`/`on_paper`), or it
+       is an in-class clicker activity (`external_tool` with an in-class
+       title) -- it happened in class; nothing to catch up on after the fact.
+    6. An assessment with no Canvas verdict -- a quiz/exam is taken in the
        room; the pipeline cannot know whether he attended, and flagging
        every past quiz every week is noise, not signal.
-    6. Otherwise (an ordinary assignment with an online submission, or no
-       Canvas record at all) -- actionable, as before.
+    7. No Canvas record, in a course Canvas covers (`covered`) -- an email
+       or syllabus restatement of work Canvas tracks under another name
+       ("Homework 4" vs "HW Chap 04", "Weekly Homework"). Canvas's own row
+       for the real object carries the verdict; this copy can only guess
+       (2026-09-24: both ECON001 homeworks, graded 100 before the deadline,
+       were listed as missed through their email copies).
+    8. Otherwise (an ordinary assignment with an online submission, or no
+       Canvas record in a course Canvas does not cover) -- actionable.
     """
-    sub = item.get("canvas_submission") or {}
-    if sub.get("missing"):
-        return True
-    if sub.get("settled"):
-        return False
+    sub = item.get("canvas_submission")
+    if sub is not None:
+        if sub.get("missing"):
+            return True
+        if sub.get("settled") or _read_before_due(item, sub):
+            return False
     pts = item.get("points_possible")
     if isinstance(pts, (int, float)) and pts == 0:
         return False
     types = item.get("submission_types")
-    if isinstance(types, (list, tuple)) and types and \
-            set(types) <= _IN_PERSON_SUBMISSION_TYPES:
-        return False
+    if isinstance(types, (list, tuple)) and types:
+        if set(types) <= _IN_PERSON_SUBMISSION_TYPES:
+            return False
+        if list(types) == ["external_tool"] and _IN_CLASS_RE.search(
+                "%s %s" % (item.get("title") or "", item.get("detail") or "")):
+            return False
     if item.get("kind") == "assessment":
+        return False
+    if sub is None and item.get("course") in covered:
         return False
     return True
 
@@ -221,6 +267,7 @@ def flag_overdue(items, today):
     a row whose meaning just changed.
     """
     flagged = []
+    covered = canvas_courses(items)
     for it in items:
         if it.get("kind") not in ATTENTION_KINDS:
             continue
@@ -230,7 +277,7 @@ def flag_overdue(items, today):
             continue
         d = _days(it.get("date"), today)
         if d is not None and d < 0:
-            if not overdue_is_actionable(it):
+            if not overdue_is_actionable(it, covered):
                 # Not a miss worth a row; it retires on its date instead,
                 # like any other past coursework (expire()).
                 continue
@@ -248,10 +295,11 @@ def retract_overdue(items):
     on Canvas after all, or is an in-class/optional/0-point one). Expired
     rather than dismissed: the pipeline, not Michael, closed it."""
     retracted = []
+    covered = canvas_courses(items)
     for it in items:
         if not it.get("overdue_flagged") or it.get("status") != "unresolved":
             continue
-        if overdue_is_actionable(it):
+        if overdue_is_actionable(it, covered):
             continue
         it["status"] = "expired"
         it["expired_reason"] = "overdue flag withdrawn: nothing to act on"
@@ -311,6 +359,8 @@ def expire(items, today):
             continue
         if it.get("regime") == "lead":
             continue
+        if applications.is_active(it.get("application")):
+            continue    # he is applying: a passed deadline is not the end
         d = _days(it.get("date"), today)
         if d is not None and d < -EXPIRE_AFTER_DAYS:
             it["status"] = "expired"
@@ -430,10 +480,14 @@ def compact_and_prune(items, today):
     for it in items:
         d = _days(it.get("date"), today)
         status = it.get("status")
+        if applications.is_active(it.get("application")):
+            kept.append(it); continue       # the tracker's row stays whole
 
         if d is not None and d < -DELETE_AFTER_DAYS:
             report["deleted"].append(it.get("id")); continue
-        if d is None and status in ("dismissed", "handled"):
+        # Dateless rows age by when they were last on the page. Expired leads
+        # have no date, so they were kept forever before 2026-10-10.
+        if d is None and status in ("dismissed", "handled", "expired"):
             shown = _days(it.get("last_shown"), today)
             if shown is not None and shown < -DELETE_AFTER_DAYS:
                 report["deleted"].append(it.get("id")); continue
@@ -499,6 +553,11 @@ def section_for(item, today):
     kind = item.get("kind")
     evidence = item.get("evidence")
 
+    if applications.is_active(item.get("application")) \
+            and status not in ("handled", "dismissed"):
+        # An application in progress stays with the opportunities until he
+        # records how it ended, whatever its deadline or expiry says.
+        return "opportunities"
     if status in TERMINAL:
         return None
     if status == "snoozed":
@@ -668,6 +727,13 @@ def assign_ai_actions(buckets, today):
                     ["study"] if d is not None and d >= STUDY_MIN_DAYS
                     and substantial else [])
                 continue
+            if section == "opportunities":
+                # Something to apply to: a draft is worth offering. An info
+                # session has nothing to write.
+                it["ai_actions"] = (
+                    [] if (it.get("opportunity") or {}).get("type")
+                    in ("info-session", "watch") else ["draft"])
+                continue
             if section == "assignments":
                 # The one judgment left. Absent the flag, nothing is earned —
                 # §6.5's default is empty, so a run that forgets to set it
@@ -694,7 +760,17 @@ def assign_ai_actions(buckets, today):
 # it to decide whether a row renders, only what badge it wears.
 
 _IN_CLASS_RE = re.compile(
-    r"\b(peer\s+instruction|clicker|iclicker|top\s*hat|in-?class)\b", re.I)
+    r"\b(peer\s+instruction|clicker|iclicker|top\s*hat|in-?class|"
+    r"participation|attendance)\b", re.I)
+
+# Canvas submission types that mean something is handed in online. When
+# Canvas names one, that is a fact about the object and outranks any title
+# keyword: "Discussion Post 3" (`discussion_topic`) was tagged "In-class,
+# nothing to upload" because "discussion" is a cheap-work keyword
+# (2026-09-24).
+_ONLINE_SUBMISSION_TYPES = frozenset((
+    "online_text_entry", "online_upload", "online_url", "online_quiz",
+    "discussion_topic", "media_recording", "student_annotation"))
 
 ACTION_TAGS = {
     "no_submission": "No submission required",
@@ -710,16 +786,18 @@ def action_tag(item):
 
     1. Canvas's own `submission_types` (threaded through by
        canvas_shadow.py) -- `["none"]` is Canvas stating, unambiguously,
-       that there is nothing to hand in. This is checked BEFORE any title
+       that there is nothing to hand in, and an online type (text entry,
+       upload, discussion post...) that there is. Checked BEFORE any title
        keyword because it is a fact about the object, not a guess about its
        name: a course could title a real submission "Participation" and a
        true no-submission entry could be titled anything.
-    2. An in-class/participation keyword in the title or detail (the same
-       vocabulary item_weight() already treats as cheap, §5.5) -- covers
-       the common case where Canvas's own field doesn't exist (a Gmail-
-       sourced row has no `submission_types` at all) or is ambiguous
-       (`external_tool` covers both an in-class clicker AND a real
-       Gradescope upload; the title is what tells those two apart).
+    2. An in-class keyword in the title or detail (clicker, peer
+       instruction, participation, attendance) -- covers the case where
+       Canvas's own field doesn't exist (a Gmail-sourced row has no
+       `submission_types` at all) or is ambiguous (`external_tool` covers
+       both an in-class clicker AND a real Gradescope upload; the title is
+       what tells those two apart). A discussion or reply is written work,
+       not in-class, so item_weight()'s cheap-work vocabulary is not used.
     3. `kind` -- an assessment defaults to "take it" (you don't "submit" an
        exam the way you submit a problem set, §6.1's own Mark-done rule);
        an assignment defaults to "submit".
@@ -734,8 +812,10 @@ def action_tag(item):
     types = item.get("submission_types")
     if isinstance(types, (list, tuple)) and list(types) == ["none"]:
         return ACTION_TAGS["no_submission"]
+    online = isinstance(types, (list, tuple)) and bool(
+        set(types) & _ONLINE_SUBMISSION_TYPES)
     title = "%s %s" % (item.get("title") or "", item.get("detail") or "")
-    if _IN_CLASS_RE.search(title) or _LOW_EFFORT.search(title):
+    if not online and _IN_CLASS_RE.search(title):
         return ACTION_TAGS["in_class"]
     if kind == "assessment":
         return ACTION_TAGS["take"]
@@ -950,14 +1030,16 @@ def _has_gcal(item):
 
 
 def _is_campus(item):
-    """A campus-calendar listing, or (brief v2) an event one of the many
+    """A campus-calendar or Handshake listing, or (brief v2) an event one of the many
     listed in a digest email -- club meetings and socials belong in the
     capped, ranked campus section, not among things he owes anyone."""
     if item.get("digest"):
         return True
-    return any("umd_calendar" in str(r.get("kind") or r.get("source") or "")
+    # Handshake's events and career fairs (service/handshake.py) are the
+    # same kind of optional thing as calendar.umd.edu's.
+    return any(src in str(r.get("kind") or r.get("source") or "")
                for r in (item.get("source_refs") or ())
-               if isinstance(r, dict))
+               if isinstance(r, dict) for src in ("umd_calendar", "handshake"))
 
 
 def coming_up_block(item):
@@ -995,7 +1077,7 @@ def relevance_score(item):
         return 0.0
 
 
-def order_campus(items, today, cap=CAMPUS_MAX, demoted_ids=()):
+def order_campus(items, today, cap=CAMPUS_MAX, demoted_ids=(), adjust=None):
     """§5.3b — the "Worth your time" section. Returns `(rows, held_back)`.
 
     Ranked by the campus ranker's own score where it survived onto the item
@@ -1022,11 +1104,15 @@ def order_campus(items, today, cap=CAMPUS_MAX, demoted_ids=()):
     that the reader is still told — `held_back` reaches the footer, and
     `feedback.summary()` names the family whose ranking he changed. A count he
     can see is not a silent withholding.
+
+    `adjust(item)` is a bounded score change added to the ranker's score
+    (feedback.weight): it tilts the order and never removes an item.
     """
     demoted = set(demoted_ids or ())
-    rows = sorted(items, key=lambda i: (i.get("id") in demoted,
-                                        -relevance_score(i),
-                                        as_date(i.get("date")) or today))
+    rows = sorted(items, key=lambda i: (
+        i.get("id") in demoted,
+        -(relevance_score(i) + (adjust(i) if adjust else 0.0)),
+        as_date(i.get("date")) or today))
     return rows[:cap], rows[cap:]
 
 

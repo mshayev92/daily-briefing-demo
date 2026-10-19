@@ -92,10 +92,10 @@ class TestThreadText:
 
 class TestMultiCandidateSweep:
     def test_a_digest_yields_every_opportunity(self, monkeypatch):
-        monkeypatch.setattr(o.google_api, "search_threads", lambda q, root: [{"id": "t1"}])
-        monkeypatch.setattr(o.google_api, "thread_bodies", lambda tid, root: {
+        monkeypatch.setattr(o.google_api, "search_threads", lambda q: [{"id": "t1"}])
+        monkeypatch.setattr(o.google_api, "thread_bodies", lambda tid: {
             "id": tid, "headers": {"Subject": "Digest"}, "messages": ["..."]})
-        monkeypatch.setattr(o.google_api, "labels", lambda root: {})
+        monkeypatch.setattr(o.google_api, "labels", lambda: {})
         monkeypatch.setattr(o.google_api, "relabel", lambda *a, **k: None)
         out = {"candidates": [
             {"thread_id": "t1", "title": "Fellowship A", "kind": "opportunity",
@@ -109,6 +109,31 @@ class TestMultiCandidateSweep:
         assert [c["title"] for c in cands] == ["Fellowship A", "Hackathon B"]
         assert cands[0]["due_date"] == "2026-10-01"
         assert run.emails_processed == 1
+
+    def test_canvas_notification_emails_are_never_extracted(self, monkeypatch):
+        """2026-09-24: Canvas is authoritative for Canvas content; its
+        notification emails made second, unmatched copies of assignments."""
+        monkeypatch.setattr(o.google_api, "search_threads",
+                            lambda q: [{"id": "c1"}, {"id": "p1"}])
+        frm = {"c1": "Econ <notifications@instructure.com>",
+               "p1": "Prof <prof@umd.edu>"}
+        monkeypatch.setattr(o.google_api, "thread_bodies", lambda tid: {
+            "id": tid, "headers": {"Subject": "s", "From": frm[tid]},
+            "messages": ["..."]})
+        monkeypatch.setattr(o.google_api, "labels", lambda: {})
+        monkeypatch.setattr(o.google_api, "relabel", lambda *a, **k: None)
+        prompts = []
+
+        def call(prompt, **k):
+            prompts.append(prompt)
+            return {"candidates": [{"thread_id": "p1", "title": "Office hours",
+                                    "kind": "event", "due_date": "2026-09-25"}]}, {}
+        monkeypatch.setattr(o.llm_cli, "call", call)
+        run = _run()
+        cands = o.step1_2_gmail_sweep(run, {"state": {"courses": {}}, "today": TODAY})
+        assert [c["title"] for c in cands] == ["Office hours"]
+        assert "id=c1" not in "".join(prompts)
+        assert run.emails_processed == 2
 
     def test_reconcile_carries_opportunity_fields_and_first_seen(self):
         run = _run()
@@ -217,6 +242,31 @@ class TestDigest:
         moved = groups[0]["entries"][1]["text"]
         assert moved == "HW 3 · now due Fri 9/25 (was tomorrow)"
         assert "flyer" not in groups[0]["entries"][3]["text"]
+        assert groups[0]["entries"][2]["text"] == "Quiz 2"   # no score in the scrape
+
+    def test_graded_shows_the_posted_score(self):
+        scrape = _scrape()
+        scrape["courses"][0]["assignments"] = [
+            {"id": 31, "points_possible": 10.0, "submission": {"score": 9.5}},
+            {"id": 32, "points_possible": 100.0, "submission": {"score": None}}]
+        rows = [_row("assignment", "changed", eid, name, {"name": name, "completion_state": "graded"},
+                     {"name": name, "completion_state": "submitted"})
+                for eid, name in ((31, "Quiz 2"), (32, "HW 9"))]
+        groups = digest.build(rows, scrape, {"MATH001": "MATH001"}, o.TZ, TODAY)
+        assert [e["text"] for e in groups[0]["entries"]] == ["Quiz 2 · 9.5/10", "HW 9"]
+
+    def test_graded_discussion_is_listed_once_with_its_due_date(self):
+        """2026-10-02: ENGL001's "Homework Due Oct. 6/ Bromley Article"
+        showed twice, as its assignment and as its discussion."""
+        name = "Homework Due Oct. 6/ Bromley Article"
+        rows = [_row("discussion", "new", 60, name, {"title": name}),
+                _row("assignment", "new", 61, name,
+                     {"name": name, "due_at": "2026-09-25T03:59:00Z"}),
+                _row("assignment", "new", 62, "Essay 1", {"name": "Essay 1"})]
+        groups = digest.build(rows, _scrape(), {"MATH001": "MATH001"}, o.TZ, TODAY)
+        texts = [e["text"] for e in groups[0]["entries"]]
+        assert texts == [name + " · due Thu 9/24", "Essay 1"]
+        assert groups[0]["entries"][0]["url"].endswith("/assignments/61")
 
     def test_baseline_same_day_keeps_its_start(self, dbpath):
         store.kv_set(dbpath, digest.BASELINE_KEY,
@@ -395,13 +445,32 @@ class TestDigestEvents:
 
 class TestOpportunityMeta:
     def test_organization_not_repeated_when_the_title_names_it(self):
-        it = {"title": "Social Media & Growth Intern - Capy's Journey", "date": None,
-              "opportunity": {"type": "internship", "organization": "Capy's Journey"}}
+        it = {"title": "Social Media & Growth Intern - Example Startup", "date": None,
+              "opportunity": {"type": "internship", "organization": "Example Startup"}}
         assert o._opportunity_row_fields(it, TODAY)["opp_meta"] == \
             "Internship · no deadline stated"
         it["opportunity"]["organization"] = "Apex Fund"
         it["title"] = "Quantitative Analyst applications"
         assert "Apex Fund" in o._opportunity_row_fields(it, TODAY)["opp_meta"]
+
+    def test_an_info_session_happens_on_its_date_it_does_not_close(self):
+        """2026-10-02: an info session with an Instagram link read
+        "Info session · closes Mon, Oct 5 (3 days)"."""
+        day = TODAY + _dt.timedelta(days=3)
+        it = {"title": "Service Trip - Information Session",
+              "date": day.isoformat(), "time": "19:00",
+              "opportunity": {"type": "info-session",
+                              "apply_url": "https://www.instagram.com/x"}}
+        meta = o._opportunity_row_fields(it, TODAY)["opp_meta"]
+        assert "closes" not in meta and "7:00 PM (in 3 days)" in meta
+        panel = {"title": "How AI Affects Your Job Application",
+                 "date": day.isoformat(), "time": "12:00", "opportunity": {}}
+        assert "12:00 PM (in 3 days)" in \
+            o._opportunity_row_fields(panel, TODAY)["opp_meta"]
+        form = {"title": "Program Application", "date": day.isoformat(),
+                "time": "23:59", "opportunity": {
+                    "type": "program", "apply_url": "https://docs.google.com/f"}}
+        assert "closes" in o._opportunity_row_fields(form, TODAY)["opp_meta"]
 
 
 class TestDossierSummary:
@@ -413,3 +482,26 @@ class TestDossierSummary:
                         "summary": "Email digest listing jobs, but no details are provided."},
             TODAY, None, email_text="Info session Wednesday. " * 5)
         assert d["summary"] == "" and "summary" in d["dropped"]
+
+
+def test_publish_records_the_rows_the_page_hides(dbpath):
+    """notify.py reads this so it never pushes a row the page left off."""
+    run = _run(dbpath)
+    run.hidden_ids = {"b", "a"}
+    assert o.step9_publish(run, {}, "<p>page</p>")
+    assert store.kv_get(dbpath, o.PAGE_HIDDEN_KEY) == ["a", "b"]
+
+
+def test_failed_cli_reports_the_stdout_envelope(monkeypatch):
+    """claude -p --output-format json puts the error in the stdout envelope and leaves stderr empty."""
+    import subprocess
+    env = {"is_error": True, "result": "Claude AI usage limit reached", "usage": {}}
+    done = subprocess.CompletedProcess([], 1, stdout=json.dumps(env), stderr="")
+    monkeypatch.setattr(llm_cli.subprocess, "run", lambda *a, **k: done)
+    with pytest.raises(llm_cli.ClaudeCliError) as e:
+        llm_cli._run_once(["claude", "--model", "m"], 5, None, False)
+    assert "exited 1: Claude AI usage limit reached" in str(e.value)
+    assert e.value.envelope == env
+    done = subprocess.CompletedProcess([], 1, stdout="", stderr="boom")
+    with pytest.raises(llm_cli.ClaudeCliError, match="exited 1: boom"):
+        llm_cli._run_once(["claude", "--model", "m"], 5, None, False)

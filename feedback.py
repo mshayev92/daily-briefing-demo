@@ -122,6 +122,15 @@ def aggregate(docs):
     return out
 
 
+def load(conn):
+    """`{item_id: {rating, family, organizer}}` from the `feedback` table: what
+    the page's thumbs wrote. The run reads it here and never writes it."""
+    return {r["item_id"]: {"rating": r["rating"], "family": r["family"],
+                           "organizer": r["organizer"]}
+            for r in conn.execute(
+                "SELECT item_id, rating, family, organizer FROM feedback")}
+
+
 def weight(item, tallies):
     """Bounded score adjustment for one candidate. 0.0 when nothing is known.
 

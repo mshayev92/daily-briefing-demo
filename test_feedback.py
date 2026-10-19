@@ -230,3 +230,74 @@ class RenderedWiringTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class LoadTest(unittest.TestCase):
+    """2026-10-10: thumbs were written to the `feedback` table and never read.
+    The run now reads that table, so a rating reaches the ranking."""
+
+    def test_reads_the_rows_the_page_wrote(self):
+        import tempfile
+        import db as dbmod
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "b.db")
+            dbmod.init_db(path)
+            conn = dbmod.connect(path)
+            conn.execute("INSERT INTO feedback (item_id, rating, family, "
+                         "organizer, at) VALUES ('c-1', 'down', 'campus:x', "
+                         "'org:y', '2026-10-10T00:00:00Z')")
+            conn.commit()
+            got = F.load(conn)
+            conn.close()
+        self.assertEqual(got["c-1"]["rating"], "down")
+        self.assertEqual(F.aggregate(got)["campus:x"], {"up": 0, "down": 1})
+
+    def test_step6_hands_the_run_its_tallies(self):
+        import tempfile
+        import datetime as _dt
+        import db as dbmod
+        import orchestrator as O
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "b.db")
+            dbmod.init_db(path)
+            conn = dbmod.connect(path)
+            for iid in ("c-1", "c-2"):
+                conn.execute("INSERT INTO feedback (item_id, rating, family, "
+                             "organizer, at) VALUES (?, 'down', 'campus:x', "
+                             "NULL, 'now')", (iid,))
+            conn.commit()
+            conn.close()
+            run = O.Run(db_path=path, dry_run=True)
+            _, _, tallies = O.step6_lifecycle(
+                run, {"today": _dt.date(2026, 10, 10)}, [])
+        self.assertEqual(tallies["campus:x"], {"up": 0, "down": 2})
+
+
+class RankingTest(unittest.TestCase):
+
+    def test_a_demoted_event_sorts_last_however_relevant(self):
+        import lifecycle as L
+        import datetime as _dt
+        today = _dt.date(2026, 10, 10)
+        strong = {"id": "strong", "date": "2026-10-20",
+                  "relevance": {"score": 9}}
+        weak = {"id": "weak", "date": "2026-10-21", "relevance": {"score": 1}}
+        rows, _ = L.order_campus([strong, weak], today, demoted_ids=["strong"])
+        self.assertEqual([r["id"] for r in rows], ["weak", "strong"])
+
+    def test_a_thumbs_up_tilts_the_order_within_its_bound(self):
+        import lifecycle as L
+        import datetime as _dt
+        today = _dt.date(2026, 10, 10)
+        a = {"id": "a", "date": "2026-10-20", "relevance": {"score": 5}}
+        b = {"id": "b", "date": "2026-10-21", "relevance": {"score": 4}}
+        rows, _ = L.order_campus(
+            [a, b], today, adjust=lambda it: 3.0 if it["id"] == "b" else 0.0)
+        self.assertEqual([r["id"] for r in rows], ["b", "a"])
+
+    def test_a_thumbs_up_moves_a_lead_up(self):
+        import orchestrator as O
+        leads = [{"id": "lead-1", "score": 5}, {"id": "lead-2", "score": 4}]
+        shown, _ = O._shown_leads(
+            leads, adjust=lambda it: 2.0 if it["id"] == "lead-2" else 0.0)
+        self.assertEqual([x["id"] for x in shown][0], "lead-2")

@@ -32,3 +32,4 @@ logs/
 .pre_redesign_backup/
 .actionability_backup_20260918/
 .claude/worktrees/
+briefing.db

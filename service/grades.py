@@ -38,6 +38,7 @@ of the grade itself.
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import os
 import statistics
 import sys
@@ -131,6 +132,13 @@ def course_facts(bundle):
         "graded_count": len(graded),
         "gradable_count": len(gradable),
         "missing_count": len(missing),
+        # What was graded, so a grade push can say "Digital Forum 10/10"
+        # rather than "1 more item graded". Scored items only.
+        "graded_items": sorted(
+            ([str(a.get("name") or "").strip(), (a.get("submission") or {})["score"],
+              a.get("points_possible")]
+             for a in graded if (a.get("submission") or {}).get("score") is not None),
+            key=lambda x: x[0]),
     }
 
 
@@ -170,6 +178,8 @@ def snapshot_row(course_label, facts, captured_at):
         "gradable_count": facts.get("gradable_count") or 0,
         "missing_count": facts.get("missing_count") or 0,
         "source": "canvas_scraper",
+        "graded_items": (json.dumps(facts["graded_items"])
+                         if facts.get("graded_items") is not None else None),
     }
 
 
@@ -201,7 +211,9 @@ def grade_display_text(facts, as_of=None, today=None):
         text = "not yet graded (0 of %d)" % gradable
     else:
         score = facts.get("current_score")
-        text = ("%d of %d graded" % (graded, gradable) if score is None else
+        # No score with grades posted: the course hides its total.
+        text = ("%d of %d graded, no total shown in Canvas" % (graded, gradable)
+                if score is None else
                 "%s%% (%d of %d graded)" % (
                     ("%.1f" % score).rstrip("0").rstrip("."), graded, gradable))
     if as_of and today and as_of != today.isoformat():

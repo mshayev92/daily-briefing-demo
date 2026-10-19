@@ -162,38 +162,29 @@ def landscape_queries(req, institution=None):
 
 
 def plan_queries(req, institution=None, today=None):
-    """Instance-hunting queries for one requirement.
+    """Instance-hunting queries for one requirement: one per keyword.
 
-    Built from the requirement's own words plus the current academic period, so
-    they stay current without anything being hardcoded. Deliberately few: the
-    cap is the budget, and a broad query answered well beats six narrow ones.
+    Each keyword is a specific thing the user named (a program, a lab, an
+    office), searched for this application cycle. Mashing several keywords
+    and the goal statement into one query, as this used to, returned
+    department homepages and degree overviews: the generic results that got
+    the first research goal switched off. The keyword carries its own
+    institution when it has one ("UMD FIRE"), so none is appended.
     """
-    kw = [k for k in (req.get("keywords") or []) if k.strip()]
-    who = (" " + institution) if institution else ""
-    period = _period(today or date.today())
-    out = []
-    if kw:
-        out.append("%s%s %s deadline" % (" ".join(kw[:3]), who, period))
-        out.append("%s%s application" % (" ".join(kw[:2]), who))
-    stem = (req.get("statement") or "").strip()
-    if stem:
-        out.append("%s%s %s" % (_head(stem), who, period))
-    return [q for q in out if q.strip()]
+    kw = [k.strip() for k in (req.get("keywords") or []) if k.strip()]
+    year = _cycle_year(today or date.today())
+    return ["%s %d application deadline" % (k, year) for k in kw]
+
+
+def _cycle_year(d):
+    """The summer an application opening now is for: from July on, next
+    year's. Internship and summer-research cycles open a full year out."""
+    d = _as_date(d)
+    return d.year + 1 if d.month >= 7 else d.year
 
 
 def _head(statement, words=6):
     return " ".join(str(statement or "").split()[:words])
-
-
-def _period(d):
-    """`fall 2026` / `spring 2027`. Cheap, and it keeps queries current without
-    anything in this file needing to know a calendar."""
-    d = _as_date(d)
-    if d.month >= 8:
-        return "fall %d" % d.year
-    if d.month >= 5:
-        return "summer %d" % d.year
-    return "spring %d" % d.year
 
 
 def _as_date(v):
@@ -262,12 +253,14 @@ def fresh_in_cache(url, cache, today, days=CACHE_DAYS):
     return (_as_date(today) - _as_date(entry["fetched_on"])).days < days
 
 
-def plan(requirements, today, institution=None, budget=None):
+def plan(requirements, today, institution=None, budget=None, skip=()):
     """Step 1. What to look for — a work order the RUN executes with its tools.
 
     Returns {"queries": [...], "budget": {...}, "notes": [...]}. Each query
     carries the requirement it serves so `ingest()` can attribute results
-    without guessing.
+    without guessing. Queries in `skip` (searched recently) are left out
+    before the budget is spent, so a long keyword list rotates through the
+    cap run by run instead of repeating its first few forever.
     """
     budget = budget or Budget()
     today = _as_date(today)
@@ -286,6 +279,8 @@ def plan(requirements, today, institution=None, budget=None):
                 "of thing exist rather than hunting named ones."
                 % (req.get("statement") or req.get("id")))
         for q in qs:
+            if q in skip:
+                continue
             if not budget.take_search():
                 notes.append(
                     "Hit the search cap while planning, so some requirements were "

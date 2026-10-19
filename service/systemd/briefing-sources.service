@@ -1,0 +1,10 @@
+[Unit]
+Description=UMD Daily Briefing -- refresh due sources, rebuild the page if anything changed
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/projects/daily-briefing/service/run_daily.sh --tick
+TimeoutStartSec=30min
+Nice=10

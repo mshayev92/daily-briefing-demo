@@ -66,8 +66,11 @@
     {{ATTENTION_MORE_LABEL}}  disclosure summary; whole details deleted when absent
     {{FURTHER_RANGE}}     "3 items · through Oct 17"   (build)
     {{FURTHER_MORE_LABEL}}    disclosure summary; whole details deleted when absent
+    {{LEADS_MORE_LABEL}}  "23 more leads"; whole details deleted when absent
     {{WEEK_STAMP}}        "Rebuilt Mon, Sep 7" — leads/opportunities eyebrow
     {{RUN_SHORT}}         "9/17"         (build)
+    {{BUILT_ON}}          "2026-09-17" — the page's own date, so it can say
+                          when it is read on a later day (build)
     {{TIME_LABEL}}        "Generated 7:02 AM ET · Mon, Sep 7"
     {{STATUS_LABEL}}      "12 emails sorted · filing on"
     Row placeholders — see the row templates: ITEM_ID, EXPAND_CONTEXT,
@@ -125,6 +128,15 @@
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--cream); }
   body { font-family: var(--sans); color: var(--ink); -webkit-text-size-adjust: 100%; }
+  /* Selection is opt-in: only the brief's own text can be highlighted. Chrome
+     (buttons, labels, menus, headings) stays unselectable. Form fields opt back
+     in so typing and selecting inside them still work. */
+  body { -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  .tldr, .row-name, .row-detail, .tbl-text, .lead-basis, .lead-ask, .opp-dossier,
+  .since, .chg-panel, .sheet-sub,
+  input, textarea, select, [contenteditable="true"] {
+    -webkit-user-select: text; user-select: text;
+  }
   h1, h2, h3, p { margin: 0; }
   button:focus-visible, a:focus-visible, input:focus-visible,
   textarea:focus-visible, summary:focus-visible {
@@ -163,11 +175,12 @@
   #section-campus { padding-top: 34px; }
   .sec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
   #section-campus .sec-head, #section-schedule .sec-head { margin-bottom: 14px; }
-  .section-label { font-family: var(--serif); font-size: 15px; font-style: italic; font-weight: 500; color: var(--muted); }
+  .section-label { font-family: var(--serif); font-size: 17px; font-style: italic; font-weight: 500; color: var(--ink-soft); }
   #section-attention .section-label { color: var(--accent-ink); }
   .sec-head .eyebrow { color: var(--muted); white-space: nowrap; }
   .empty-note { font-family: var(--serif); font-style: italic; font-size: 14px; color: var(--muted); }
   .section.is-empty .sec-head { margin-bottom: 8px; }
+  .section.is-empty:not([data-empty]) { display: none; }
 
   /* course pills — the canvas's colours, one pair per course */
   .course-tag {
@@ -202,6 +215,8 @@
      override this" (.d-only). */
   .row.is-done, .wk-group.is-done, .t-row.is-done, .tbl-row.is-done, details.more.is-done { display: none !important; }
   .row-new { display: none; }
+  .decided-undo { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%); z-index: 50; display: flex; gap: 12px; align-items: center; padding: 10px 14px; background: var(--ink); color: var(--paper); border-radius: 8px; font-family: var(--sans); font-size: 14px; }
+  .decided-undo button { background: none; border: 0; padding: 0; color: inherit; font: inherit; font-weight: 600; text-decoration: underline; cursor: pointer; }
   .row-detail:empty { display: none; }
   .row-actions { position: absolute; right: 10px; bottom: 10px; z-index: 5; }
   .act {
@@ -230,7 +245,7 @@
   /* Inserted at runtime, one per .row-menu (script block 2) -- see the
      comment there. Off everywhere but the phone action-sheet breakpoint,
      where .row-menu stops being a dropdown next to its own trigger. */
-  .row-menu-close { display: none; }
+  .row-menu-close, .row-menu-title { display: none; }
   .menu-item {
     display: flex; align-items: center; width: 100%; text-align: left;
     font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--ink);
@@ -241,6 +256,29 @@
   .menu-item:disabled { opacity: 0.5; cursor: default; }
   .menu-rate { display: flex; align-items: center; gap: 4px; margin-top: 4px; padding: 6px 10px 2px; border-top: 1px solid var(--line); }
   .menu-rate-lbl { flex: 1; font-size: 11px; color: var(--muted); }
+  /* Application status (applications.py). Every stage button ships; the
+     script shows only the ones that can follow the row's current stage. */
+  .menu-stage { margin-top: 4px; padding-top: 6px; border-top: 1px solid var(--line); }
+  .menu-stage .menu-rate-lbl { display: block; padding: 0 10px 2px; }
+  .menu-stage .menu-item[hidden], .menu-date[hidden] { display: none; }
+  /* Selected rows hide the items that no longer apply (see paint() below).
+     .menu-item's display:flex would otherwise win over the hidden attribute. */
+  .row-menu .menu-item[hidden] { display: none; }
+  .row-menu .menu-rate[hidden] { display: none; }
+  .menu-date { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 40px; padding: 0 10px; font-size: 13px; font-weight: 500; color: var(--ink); white-space: nowrap; }
+  .menu-date input, .track-form input, .track-form select { font-family: var(--sans); font-size: 12.5px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; }
+  .track-form { display: grid; gap: 12px; }
+  .track-form label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; }
+  .track-form input, .track-form select { width: 100%; font-weight: 400; padding: 7px 8px; }
+  /* iOS Safari gives an empty date input its own intrinsic width and height,
+     so it overflows the sheet and stands taller than its siblings. */
+  .track-form input { box-sizing: border-box; min-width: 0; }
+  .track-form input[type="date"] { -webkit-appearance: none; appearance: none; min-height: calc(1.3em + 16px); line-height: 1.3; }
+  .track-form input[type="date"]::-webkit-date-and-time-value { text-align: left; }
+  /* iOS zooms the page when a focused field's text is under 16px. */
+  @media (pointer: coarse) { .track-form input, .track-form select { font-size: 16px; } }
+  .app-stage { display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 999px;
+    background: var(--accent-ink); color: var(--cream); font-weight: 600; font-size: 11px; letter-spacing: 0.02em; }
   .rate { flex: none; width: 28px; height: 26px; padding: 0; cursor: pointer; border: 1px solid transparent; border-radius: 5px; background: none; font-size: 13px; line-height: 1; filter: grayscale(1) opacity(0.55); }
   .rate:hover { background: var(--paper); filter: grayscale(0.4) opacity(0.9); }
   .rate[aria-pressed="true"] { filter: none; background: var(--paper); border-color: var(--line); }
@@ -269,7 +307,8 @@
   .page-actions { display: block; margin: 32px 0 0; padding-top: 24px; border-top: 1px dashed var(--line); }
 
   /* ---------------- Today — Due: two-up cards ---------------- */
-  .cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  /* auto-fit + min(100%, 420px): two columns at most, and a lone card takes the full width. */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 14px; }
   .cards .row {
     background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px;
     display: grid; grid-template-columns: max-content minmax(0, 1fr); column-gap: 12px; row-gap: 10px; align-content: start;
@@ -295,8 +334,8 @@
      separator in the markup (render_briefing.build_row) -- without this the
      two runs of text visually concatenate, e.g. "2:00 PMIn-class...". */
   .action-tag:not(:empty)::before { content: " \00b7 "; }
-  .cards .row-name { grid-row: 2; grid-column: 1 / -1; font-size: 19px; font-weight: 600; line-height: 1.3; }
-  .cards .row-detail { grid-row: 3; grid-column: 1 / -1; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
+  .cards .row-name { grid-row: 2; grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; font-size: 19px; font-weight: 600; line-height: 1.3; }
+  .cards .row-detail { grid-row: 3; grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; font-size: 13.5px; color: var(--muted); line-height: 1.5; }
   .cards .row-expand { grid-row: 4; }
 
   /* ---------------- time panels: calendar + campus ---------------- */
@@ -313,8 +352,17 @@
   .t-title { font-size: 14px; font-weight: 500; }
   .t-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
   .t-title .course-tag { margin-right: 8px; font-size: 11px; padding: 2px 8px; vertical-align: 1px; }
+  .t-row.is-suggested { background: transparent; }
+  .t-row.is-suggested .t-title { font-weight: 400; }
+  .t-row.is-canceled .t-title, .t-row.is-canceled .t-sub { color: var(--muted); }
+  .t-row.is-canceled .t-title { text-decoration: line-through; }
+  .t-canceled { margin-left: 8px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--line-2); border-radius: 100px; padding: 1px 8px; vertical-align: 1px; text-decoration: none; display: inline-block; }
+  .t-suggest { margin-left: 8px; font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); border: 1px dashed var(--line-2); border-radius: 100px; padding: 1px 8px; vertical-align: 1px; }
+  .t-why { font-style: italic; }
   .t-note { font-size: 12.5px; font-style: italic; color: var(--muted); }
   .t-note.tight { font-style: normal; font-weight: 600; color: var(--accent-ink); }
+  .t-row.is-past { opacity: 0.5; }
+  .t-row.t-gap.is-past { display: none; }
   .times .row { min-width: 0; }
   .times .row .course-tag, .times .row-meta { display: none; }
   .times .row-name { font-size: 14px; font-weight: 500; }
@@ -338,7 +386,7 @@
   .wk-items { font-size: 13px; font-weight: 500; line-height: 1.4; }
   .wk-items .row, .wk-items .row > div:first-child, .wk-items .row-title { display: inline; }
   .wk-items .row { position: static; }
-  .wk-items .row + .row::before { content: " · "; }
+  .wk-items .row:not(.is-done) ~ .row:not(.is-done)::before { content: " · "; }
   .wk-items .course-tag, .wk-items .row-meta, .wk-items .row-detail { display: none; }
   .wk-items .row-actions { position: absolute; left: 0; right: auto; top: 100%; bottom: auto; }
   .wk-items .act-menu { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
@@ -366,6 +414,7 @@
   .attn-bulk { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 0 0 10px; font-family: var(--sans); font-size: 12.5px; color: var(--ink-soft); }
   .attn-bulk-all { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
   .attn-bulk-count { color: var(--muted); }
+  .section.is-empty .attn-bulk { display: none; }
   .more { margin-top: 12px; }
   .more > summary { display: inline-flex; cursor: pointer; list-style: none; font-family: var(--mono); font-size: 12px; letter-spacing: 0.09em; text-transform: uppercase; color: var(--muted); padding: 4px 0; }
   .more > summary::-webkit-details-marker { display: none; }
@@ -398,6 +447,12 @@
   .tbl > * + * { border-top: 1px solid var(--line); }
   .tbl-row .course-tag, .tbl .row .course-tag { justify-self: stretch; }
   .tbl-text { font-size: 13.5px; }
+  /* The course grade sits under the item it is NOT about, muted, so the row
+     reads as "next thing" first (2026-10-17: on a phone the " · course grade
+     ..." tail made four-line rows). */
+  .tbl-name, .tbl-grade { display: block; }
+  .tbl-grade { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .tbl-grade:empty { display: none; }
   .tbl-when { font-family: var(--mono); font-size: 12.5px; color: var(--muted); text-align: right; }
   .tbl .row > div:first-child, .tbl .row-title { display: contents; }
   .tbl .row-name { font-size: 13.5px; font-weight: 400; }
@@ -449,7 +504,7 @@
   .chg-text { font-size: 13.5px; line-height: 1.45; overflow-wrap: anywhere; }
   .chg-text a, .t-link { color: inherit; text-decoration: none; border-bottom: 1px solid var(--line-2); }
   .chg-text a:hover, .t-link:hover { border-bottom-color: currentColor; }
-  .chg-sum { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin-top: 3px; }
+  .chg-sum { font-size: 13px; color: var(--ink-soft); line-height: 1.5; overflow-wrap: anywhere; margin-top: 3px; }
 
   /* ---------------- Opportunity dossiers (brief v2) ---------------- */
   .opp-dossier { margin-top: 10px; font-size: 13.5px; line-height: 1.55; color: var(--ink-soft); }
@@ -458,7 +513,7 @@
   .dos-note { font-style: italic; color: var(--muted); }
   .dos-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 6px 16px; margin: 10px 0 0; padding: 11px 13px; background: var(--paper); border-radius: 8px; }
   .dos-facts > div { display: contents; }
-  .dos-facts dt { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding-top: 3px; white-space: nowrap; }
+  .dos-facts dt { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); padding-top: 3px; white-space: nowrap; }
   .dos-facts dd { margin: 0; overflow-wrap: anywhere; }
   .dos-facts q { quotes: "\201C" "\201D"; }
   .dos-fit { margin-top: 10px; font-style: italic; color: var(--ink-soft); }
@@ -551,9 +606,14 @@
   .req-sub { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 6px; }
   .req-sub .pq-opts { margin-top: 0; }
   .req-lbl { font-size: 11px; color: var(--muted); }
-  .req-kw { flex: 1 1 160px; min-width: 120px; font-family: var(--sans); font-size: 11.5px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; }
+  .req-kw { resize: vertical; line-height: 1.4; flex: 1 1 160px; min-width: 120px; font-family: var(--sans); font-size: 11.5px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 6px; }
   .req-del { flex: none; }
   .req-add { margin-top: 9px; }
+  .footer-links { display: flex; gap: 14px; justify-content: center; }
+  .src.is-off .pq-label, .src.is-off .pq-help { opacity: 0.55; }
+  .src-when { font-size: 11.5px; color: var(--muted); margin-top: 3px; line-height: 1.4; }
+  .src-when.is-error { color: var(--urgent); }
+  .src .pq-opts + .pq-opts { margin-top: 5px; }
   .req-empty { font-size: 12.5px; font-style: italic; color: var(--muted); margin-top: 6px; line-height: 1.45; }
 
   /* ---------------- dark mode (brief v2) ----------------
@@ -611,7 +671,7 @@
   @media (max-width: 640px) {
     .d-only { display: none !important; }
     .m-only { display: inline; }
-    .eyebrow { font-size: 10.5px; letter-spacing: 0.08em; }
+    .eyebrow { font-size: 11px; letter-spacing: 0.08em; }
     .mast-in { padding: 28px 20px 26px; gap: 14px; }
     /* The weather line used to be hidden on phones -- the device the
        daily email is actually opened on. It now takes its own line. */
@@ -626,15 +686,16 @@
     .section, .section:first-child { padding-top: 26px; }
     #section-campus { padding-top: 24px; }
     .sec-head, #section-campus .sec-head, #section-schedule .sec-head { margin-bottom: 10px; }
-    .section-label { font-size: 13px; }
+    .section-label { font-size: 15px; }
     .sec-head .eyebrow.d-only { display: none; }
     .cards { display: flex; flex-direction: column; gap: 10px; }
     .cards .row { padding: 16px; row-gap: 8px; }
-    .cards .row-meta { font-size: 10.5px; letter-spacing: 0.08em; }
+    .cards .row-meta { font-size: 11px; letter-spacing: 0.08em; }
     .cards .row-name { font-size: 16px; }
     .cards .row-detail { font-size: 12.5px; line-height: 1.45; }
-    .t-group { display: none; }
+    .stack .row { padding: 15px 16px; }
     .t-row { grid-template-columns: 66px 1fr; gap: 10px; padding: 11px 16px; }
+    .t-group { padding: 14px 16px 6px; }
     .panel > .t-row:first-child, .panel > .t-group:first-child + .t-row { border-top: 0; }
     .t-row:last-child { padding-bottom: 13px; }
     .t-time { font-size: 12px; }
@@ -658,13 +719,13 @@
     .tbl-text { font-size: 13px; }
     .tbl .row-meta .action-tag { white-space: normal; max-width: 8.5em; margin-left: auto; font-size: 11px; }
     .tbl .row .course-tag { justify-self: start; }
-    .chg-course { grid-template-columns: 1fr; gap: 8px; padding: 13px 14px; }
+    .chg-course { grid-template-columns: minmax(0, 1fr); gap: 8px; padding: 13px 14px; }
     .chg-course > .course-tag { justify-self: start; }
-    .chg { grid-template-columns: 1fr; gap: 1px; }
-    .chg-kind { font-size: 10px; }
+    .chg { grid-template-columns: minmax(0, 1fr); gap: 1px; }
+    .chg-kind { font-size: 11px; }
     .dos-facts { grid-template-columns: 1fr; gap: 2px; }
     .dos-facts dd { margin-bottom: 6px; }
-    .footer { font-size: 10px; margin: 30px 0 0; padding-bottom: 34px; }
+    .footer { font-size: 11px; margin: 30px 0 0; padding-bottom: 34px; }
     .footer .status { display: none; }
 
   }
@@ -697,6 +758,11 @@
       display: inline-flex; align-items: center; justify-content: center;
       position: absolute; top: 8px; right: 8px; z-index: 1;
     }
+    .row-menu-title {
+      display: block; position: absolute; top: 15px; left: 18px; right: 56px;
+      font: 600 14px/1.3 var(--sans); color: var(--ink);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
   }
 
   @media print {
@@ -720,6 +786,7 @@
     <!-- CHANGE STRIP (§5.0). render() deletes the whole div when absent. -->
     <div class="changes">{{CHANGE_STRIP}}</div>
     <p class="since" data-role="since" hidden></p>
+    <p class="since stale" data-role="stale" data-built="{{BUILT_ON}}" hidden></p>
     <div class="pills">
       <!-- INSERT MASTHEAD PILLS HERE -->
     </div>
@@ -822,6 +889,7 @@
               <a class="menu-item canvas-link" role="menuitem" href="{{CANVAS_URL}}" target="_blank" rel="noopener">Open in Canvas</a>
               <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the source</a>
               <a class="menu-item add-reminder" role="menuitem" href="{{ADD_REMINDER_URL}}" target="_blank" rel="noopener">Add reminder</a>
+              <button type="button" class="menu-item" role="menuitem" data-action="dismiss" data-item-id="{{ITEM_ID}}">Not for me</button>
               <div class="menu-rate" role="group" aria-label="Was this worth showing?">
                 <span class="menu-rate-lbl">Worth showing?</span>
                 <button class="rate" type="button" data-action="rate" data-rating="up" aria-pressed="false" aria-label="Yes, more like this" title="Yes, more like this">&#128077;</button>
@@ -881,7 +949,8 @@
 
         <div class="tbl-row" data-ref="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
           <span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span>
-          <p class="tbl-text">{{TEXT}}</p>
+          <p class="tbl-text"><span class="tbl-name">{{TEXT}}</span>
+            <span class="tbl-grade">{{GRADE}}</span></p>
           <span class="tbl-when">{{WHEN}}</span>
           <div class="row-actions">
             <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
@@ -935,10 +1004,10 @@
     builds from escaped values: quoted facts (checked against the source
     page by service/research.py) and one line labelled as Claude's read:
 
-        <div class="row" data-item-id="{{ITEM_ID}}" data-context="{{EXPAND_CONTEXT}}">
+        <div class="row" data-item-id="{{ITEM_ID}}" data-app-stage="{{APP_STAGE}}" data-app-prior="{{APP_PRIOR_STAGE}}" data-context="{{EXPAND_CONTEXT}}">
           <div>
             <div class="row-title"><span class="course-tag {{COURSE_CLASS}}">{{COURSE_LABEL}}</span><span class="row-name">{{TITLE}}</span></div>
-            <div class="row-meta"><span class="row-new">New</span>{{OPP_META}}</div>
+            <div class="row-meta"><span class="row-new">New</span><span class="app-stage">{{APP_STAGE_LABEL}}</span>{{OPP_META}}</div>
             <div class="opp-dossier">{{DOSSIER_HTML}}</div>
             <div class="opp-meta opp-ineligible">{{INELIGIBLE_NOTE}}</div>
             <div class="lead-act">{{ACT_BY_LINE}}</div>
@@ -946,9 +1015,25 @@
           <div class="row-actions">
             <button type="button" class="act act-menu" data-action="row-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Actions" title="Actions"><svg viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="3" cy="8" r="1.5" fill="currentColor"/><circle cx="8" cy="8" r="1.5" fill="currentColor"/><circle cx="13" cy="8" r="1.5" fill="currentColor"/></svg></button>
             <div class="row-menu" role="menu" hidden>
-              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">Open the application page</a>
+              <a class="menu-item source-link" role="menuitem" href="{{SOURCE_URL}}" target="_blank" rel="noopener">{{SOURCE_LABEL}}</a>
+              <a class="menu-item draft-link" role="menuitem" href="{{DRAFT_URL}}" target="_blank" rel="noopener">Open my draft</a>
+              <button type="button" class="menu-item" role="menuitem" data-action="ai" data-task="draft"{{DRAFT_ATTR}}>Draft my application</button>
               <button type="button" class="menu-item" role="menuitem" data-action="show-detail">Show full detail</button>
               <a class="menu-item add-reminder" role="menuitem" href="{{ADD_REMINDER_URL}}" target="_blank" rel="noopener">Add reminder</a>
+              <div class="menu-stage" role="group" aria-label="Application status">
+                <span class="menu-rate-lbl">Mark as</span>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="applying" data-item-id="{{ITEM_ID}}">I'm applying</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="submitted" data-item-id="{{ITEM_ID}}">Submitted</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="interview" data-item-id="{{ITEM_ID}}">Got an interview</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="offer" data-item-id="{{ITEM_ID}}">Got an offer</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="accepted" data-item-id="{{ITEM_ID}}">Selected</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="confirmed" data-decision data-item-id="{{ITEM_ID}}">I accepted</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="withdrawn" data-decision data-item-id="{{ITEM_ID}}">I declined</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="rejected" data-item-id="{{ITEM_ID}}">Not selected</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="withdrawn" data-item-id="{{ITEM_ID}}">Withdrew</button>
+                <button type="button" class="menu-item" role="menuitem" data-action="app-stage" data-stage="applying" data-undo data-item-id="{{ITEM_ID}}">Undo</button>
+                <label class="menu-date"><span data-role="follow-up-label">Follow up on</span> <input type="date" data-action="app-follow-up" data-item-id="{{ITEM_ID}}" value="{{APP_FOLLOW_UP}}"></label>
+              </div>
               <button type="button" class="menu-item" role="menuitem" data-action="dismiss" data-item-id="{{ITEM_ID}}">Not for me</button>
               <div class="menu-rate" role="group" aria-label="Was this worth showing?">
                 <span class="menu-rate-lbl">Worth showing?</span>
@@ -1013,19 +1098,7 @@
     </div>
   </div><!-- /section-week -->
 
-  <div class="section" id="section-opportunities">
-    <div class="sec-head"><h2 class="section-label">Opportunities</h2><span class="eyebrow d-only">{{OPPS_STAMP}}</span></div>
-    <div class="stack">
-      <!-- INSERT OPPORTUNITY ROWS HERE -->
-    </div>
-  </div><!-- /section-opportunities -->
 
-  <div class="section" id="section-campus" data-empty="No campus events matched your preferences this week.">
-    <div class="sec-head"><h2 class="section-label">{{CAMPUS_HEADING}}</h2><span class="eyebrow d-only">optional, low-stakes</span></div>
-    <div class="panel times">
-      <!-- INSERT CAMPUS HERE -->
-    </div>
-  </div><!-- /section-campus -->
 
   <div class="section" id="section-standing">
     <div class="sec-head"><h2 class="section-label">Where you stand</h2><span class="eyebrow">next thing per course</span></div>
@@ -1033,7 +1106,6 @@
       <!-- INSERT STANDING HERE -->
     </div>
   </div><!-- /section-standing -->
-
   <div class="section" id="section-further">
     <div class="sec-head"><h2 class="section-label">Further out</h2><span class="eyebrow d-only">{{FURTHER_RANGE}}</span></div>
     <div class="tbl">
@@ -1051,12 +1123,39 @@
       </div>
     </details>
   </div><!-- /section-further -->
+  <div class="section" id="section-campus" data-empty="No campus events matched your preferences this week.">
+    <div class="sec-head"><h2 class="section-label">{{CAMPUS_HEADING}}</h2><span class="eyebrow d-only">optional, low-stakes</span></div>
+    <div class="panel times">
+      <!-- INSERT CAMPUS HERE -->
+    </div>
+  </div><!-- /section-campus -->
 
-  <div class="section" id="section-leads">
+
+
+  <div class="section" id="section-opportunities">
+    <div class="sec-head"><h2 class="section-label">Opportunities</h2><span class="eyebrow d-only">{{OPPS_STAMP}}</span></div>
+    <div class="stack">
+      <!-- INSERT OPPORTUNITY ROWS HERE -->
+    </div>
+  </div><!-- /section-opportunities -->
+  <div class="section" id="section-watching" style="display:none">
+    <div class="sec-head"><h2 class="section-label">Things watching</h2></div>
+    <div class="stack" id="watch-hits"></div>
+  </div><!-- /section-watching -->
+  <div class="section" id="section-leads" data-empty="No leads vetted for your goals right now.">
     <div class="sec-head"><h2 class="section-label">Leads — unconfirmed, worth one look</h2><span class="eyebrow d-only">{{WEEK_STAMP}}</span></div>
     <div class="stack">
       <!-- INSERT LEAD ROWS HERE -->
     </div>
+    <!-- Open leads past the shown cap are demoted here rather than dropped,
+         same treatment as Further out's further-more above. render()
+         deletes the whole details when there is nothing to hide. -->
+    <details class="more leads-more">
+      <summary><span class="more-open">{{LEADS_MORE_LABEL}}</span><span class="more-shut">Show fewer</span></summary>
+      <div class="stack">
+        <!-- INSERT MORE LEAD ROWS HERE -->
+      </div>
+    </details>
   </div><!-- /section-leads -->
 
 
@@ -1071,14 +1170,19 @@
        POST /ai/week (service/app.py). -->
   <div class="page-actions">
     <button type="button" class="act" data-action="ai-page" data-task="week">Plan my week</button>
+    <button type="button" class="act" data-action="track-open" aria-haspopup="dialog">Track an application</button>
     <div class="page-expand" hidden></div>
   </div>
 
   <div class="footer">
-    <span class="d-only">Generated from your Gmail, Calendar and course pages &middot; last run {{RUN_SHORT}}</span>
+    <span class="d-only">Generated from your Gmail, Calendar, Canvas and Handshake &middot; last run {{RUN_SHORT}}</span>
     <span class="m-only">Last run {{RUN_SHORT}}</span>
     <span class="status">{{TIME_LABEL}} &middot; {{STATUS_LABEL}}</span>
-    <button type="button" class="linkbtn" data-action="prefs-open" aria-haspopup="dialog">Brief preferences</button>
+    <span class="footer-links">
+      <button type="button" class="linkbtn" data-action="prefs-open" aria-haspopup="dialog">Brief preferences</button>
+      <button type="button" class="linkbtn" data-action="sources-open" aria-haspopup="dialog">Sources</button>
+      <button type="button" class="linkbtn" data-action="notify-open" aria-haspopup="dialog">Notifications</button>
+    </span>
   </div>
 
 </div>
@@ -1093,6 +1197,67 @@
   </div>
   <div class="sheet-body" data-role="detail-body"></div>
   <div class="sheet-foot" data-role="detail-foot" hidden></div>
+</dialog>
+
+<dialog class="sheet" id="sheet-track" aria-labelledby="sheet-track-title">
+  <div class="sheet-head">
+    <div class="sheet-title" id="sheet-track-title">Track an application
+      <div class="sheet-sub">For one the brief didn't show you. It joins Opportunities, with its dates and a Draft button, from the next brief.</div>
+    </div>
+    <button class="sheet-close" type="button" data-action="sheet-close" aria-label="Close">&#215;</button>
+  </div>
+  <div class="sheet-body">
+    <form class="track-form" data-role="track-form">
+      <label>What is it? <input type="text" name="title" required maxlength="140" placeholder="e.g. Acme Fellows internship"></label>
+      <label>Organization <input type="text" name="organization" maxlength="100"></label>
+      <label>Link to the listing or application <input type="url" name="url" maxlength="500" placeholder="https://"></label>
+      <label>Deadline <input type="date" name="deadline"></label>
+      <label>Where you are
+        <select name="stage">
+          <option value="applying">Applying</option>
+          <option value="submitted">Submitted</option>
+          <option value="interview">Interviewing</option>
+          <option value="offer">Have an offer</option>
+        </select>
+      </label>
+    </form>
+  </div>
+  <div class="sheet-foot">
+    <button type="button" class="act" data-action="track-save">Start tracking</button>
+    <span class="prefs-status" data-role="track-status" role="status" aria-live="polite"></span>
+  </div>
+</dialog>
+
+<dialog class="sheet" id="sheet-sources" aria-labelledby="sheet-sources-title">
+  <div class="sheet-head">
+    <div class="sheet-title" id="sheet-sources-title">Sources
+      <div class="sheet-sub">Where the brief gets its information, and how often each is refreshed. Daily means once each morning at 6:30.</div>
+    </div>
+    <button class="sheet-close" type="button" data-action="sheet-close" aria-label="Close">&#215;</button>
+  </div>
+  <div class="sheet-body">
+    <div class="prefs-body" data-role="sources-body"></div>
+  </div>
+  <div class="sheet-foot">
+    <button type="button" class="act" data-action="sources-save">Save sources</button>
+    <span class="prefs-status" data-role="sources-status" role="status" aria-live="polite"></span>
+  </div>
+</dialog>
+
+<dialog class="sheet" id="sheet-notify" aria-labelledby="sheet-notify-title">
+  <div class="sheet-head">
+    <div class="sheet-title" id="sheet-notify-title">Notifications
+      <div class="sheet-sub">What the Daily Briefing app and your phone tell you about. Phone pushes come through your own ntfy server with the full text.</div>
+    </div>
+    <button class="sheet-close" type="button" data-action="sheet-close" aria-label="Close">&#215;</button>
+  </div>
+  <div class="sheet-body">
+    <div class="prefs-body" data-role="notify-body"></div>
+  </div>
+  <div class="sheet-foot">
+    <button type="button" class="act" data-action="notify-save">Save notifications</button>
+    <span class="prefs-status" data-role="notify-status" role="status" aria-live="polite"></span>
+  </div>
 </dialog>
 
 <dialog class="sheet" id="sheet-prefs" aria-labelledby="sheet-prefs-title">
@@ -1194,25 +1359,106 @@
     // so they're on the same `endpoint`/`wants` shape as the other two and
     // the shim helper and its promise below are gone -- nothing in this
     // block reads a `path` store any more.
+    // ---- UNDO (GET/POST /undo, service/app.py) --------------------------
+    // The newest page action can be undone (the server keeps it until a newer
+    // one). The bar shows for UNDO_MS after the action, and for the rest of
+    // that window after a reload. Undo puts the item's row back; the server
+    // puts its status back.
+    var UNDO_MS = 10000;
+    var undoTimer = null;
+    function hideUndoBar() {
+      clearTimeout(undoTimer);
+      var old = document.querySelector(".action-undo");
+      if (old && old.parentNode) old.parentNode.removeChild(old);
+    }
+    function showUndoBar(what, ms) {
+      hideUndoBar();
+      var bar = document.createElement("div");
+      bar.className = "decided-undo action-undo";
+      bar.setAttribute("role", "status");
+      var msg = document.createElement("span");
+      msg.textContent = what + ". ";
+      var undo = document.createElement("button");
+      undo.type = "button";
+      undo.textContent = "Undo";
+      bar.appendChild(msg);
+      bar.appendChild(undo);
+      document.body.appendChild(bar);
+      undoTimer = setTimeout(hideUndoBar, ms || UNDO_MS);
+      undo.addEventListener("click", function () {
+        undo.disabled = true;
+        fetch("/undo", { method: "POST" }).then(function (res) {
+          if (!res.ok) throw new Error("undo failed");
+          return res.json();
+        }).then(function (done) {
+          var sel = '.row[data-item-id="' + esc(done.id) + '"], [data-ref="' + esc(done.id) + '"]';
+          Array.prototype.forEach.call(document.querySelectorAll(sel), function (row) {
+            row.classList.remove("is-done");
+            // Done/Resolved also hid the group, day, overflow and section
+            // around the row and added the section's empty note. Undo the
+            // same hiding, or the note stays under the restored row.
+            ["wk-group", "t-row", "more"].forEach(function (cls) {
+              var anc = row.closest(cls === "more" ? "details.more" : "." + cls);
+              if (anc) anc.classList.remove("is-done");
+            });
+            var day = row.closest(".wk-day");
+            if (day) day.classList.remove("is-cleared");
+            var section = row.closest(".section");
+            if (section) {
+              section.classList.remove("is-empty");
+              Array.prototype.forEach.call(section.querySelectorAll(".empty-note"), function (note) {
+                note.parentNode.removeChild(note);
+              });
+            }
+          });
+          // A store button goes disabled on click so it cannot fire twice.
+          // Undo must let the action be taken again in this session.
+          Array.prototype.forEach.call(document.querySelectorAll(
+            '[data-action][data-item-id="' + esc(done.id) + '"]'), function (btn) {
+            btn.disabled = false;
+          });
+          refreshCounts();
+          hideUndoBar();
+          document.dispatchEvent(new CustomEvent("briefing:undone", { detail: done }));
+        }).catch(function () { undo.disabled = false; });
+      });
+    }
+    // An application click (status, follow-up date, decision) offers Undo
+    // here too: one undo log covers every page action (service/app.py).
+    document.addEventListener("briefing:acted", function (e) {
+      if (e.detail && e.detail.what) showUndoBar(e.detail.what);
+    });
+
+    var UNDO_WORDS = { done: "Marked done", resolved: "Marked resolved",
+      confirmed: "Confirmed", killed: "Marked killed", dismissed: "Dismissed" };
+    fetch("/undo").then(function (res) {
+      return res.ok ? res.json() : {};
+    }).then(function (last) {
+      if (!last || !last.item_id) return;
+      var age = Date.now() - Date.parse(last.at);
+      var word = last.label || UNDO_WORDS[last.action];
+      if (age < UNDO_MS && word) showUndoBar(word, UNDO_MS - age);
+    }).catch(function () { });
+
     var STORES = [
-      { action: "mark-done",
+      { action: "mark-done", undo: "Marked done",
         endpoint: function (id) { return "/items/" + encodeURIComponent(id) + "/done"; },
         wants: "handled", section: "section-today", empty: "Nothing due today." },
-      { action: "mark-resolved",
+      { action: "mark-resolved", undo: "Marked resolved",
         endpoint: function (id) { return "/attention/" + encodeURIComponent(id) + "/resolved"; },
         wants: "dismissed", section: "section-attention", empty: "Nothing needs your attention." },
       // §14.3. Two stores, not one flag: `killed` means the hypothesis was
       // TESTED and was wrong, so it must never be re-raised; `confirmed` means
       // it was real and has graduated out of the lead regime. Collapsing them
       // would lose the distinction the run needs to not repeat itself.
-      { action: "lead-confirmed",
+      { action: "lead-confirmed", undo: "Confirmed",
         endpoint: function (id) { return "/leads/" + encodeURIComponent(id) + "/confirmed"; },
-        wants: "confirmed", section: "section-leads", empty: "No leads this week." },
-      { action: "lead-killed",
+        wants: "confirmed", section: "section-leads", empty: "No leads vetted for your goals right now." },
+      { action: "lead-killed", undo: "Marked killed",
         endpoint: function (id) { return "/leads/" + encodeURIComponent(id) + "/killed"; },
-        wants: "killed", section: "section-leads", empty: "No leads this week." },
+        wants: "killed", section: "section-leads", empty: "No leads vetted for your goals right now." },
       // Brief v2: "Not for me" on an opportunity.
-      { action: "dismiss",
+      { action: "dismiss", undo: "Dismissed",
         endpoint: function (id) { return "/items/" + encodeURIComponent(id) + "/dismiss"; },
         wants: "dismissed", section: "section-opportunities", empty: "Nothing open right now." }
     ];
@@ -1238,7 +1484,7 @@
         });
         if (key === "attention") {
           var m = document.querySelector("#section-attention .section-label .m-only");
-          if (m) m.textContent = " \u00b7 " + n;
+          if (m) m.textContent = n ? " \u00b7 " + n : "";
         }
       });
     }
@@ -1290,10 +1536,13 @@
         }
       });
       // A section whose every row is done gets the same one-line note it
-      // would have shipped with (its own data-empty text).
-      document.querySelectorAll(".section[data-empty]").forEach(function (section) {
-        if (!section.querySelector(".row")) return;
-        if (section.querySelectorAll(".row:not(.is-done)").length > 0) return;
+      // would have shipped with (its own data-empty text). One without such
+      // a note (Where you stand) is left out of a render with no rows, so it
+      // hides instead (CSS: .section.is-empty:not([data-empty])).
+      document.querySelectorAll(".section").forEach(function (section) {
+        if (!section.querySelector(".row, .tbl-row")) return;
+        if (section.querySelectorAll(".row:not(.is-done), .tbl-row:not(.is-done)").length > 0) return;
+        if (!section.hasAttribute("data-empty")) { section.classList.add("is-empty"); return; }
         if (section.querySelector(".empty-note")) return;
         var note = document.createElement("div");
         note.className = "empty-note";
@@ -1344,6 +1593,8 @@
 
           writeQueue = writeQueue.then(function () {
             return fetch(store.endpoint(itemId), { method: "POST" });
+          }).then(function (res) {
+            if (res.ok) showUndoBar(store.undo);
           }).catch(function () {
             // Best effort: a failed write leaves the row hidden for this
             // session only. Convenience layer, not a system of record.
@@ -1359,6 +1610,523 @@
         refreshCounts();
       });
     });
+
+    // ---- APPLICATION STATUS (applications.py) ----------------------------
+    // Every stage button ships in the opportunity row's menu; this shows the
+    // ones that can follow the row's current stage (data-app-stage, "" when
+    // untracked), paints the stage chip, and posts a click to
+    // POST /applications/{id}. The server accepts any stage, so a mistaken
+    // click is corrected the same way. The row's dates line (start by /
+    // follow up) is computed by the run and updates on the next brief.
+    (function () {
+      // The stage buttons offered from each stage. Selected and Offer take
+      // no generic move: his answer is the two data-decision buttons.
+      // Closed stages (rejected, withdrawn) take only Undo.
+      var NEXT = {
+        "": ["applying", "submitted"],
+        applying: ["submitted", "withdrawn"],
+        submitted: ["interview", "accepted", "rejected", "withdrawn"],
+        interview: ["offer", "accepted", "rejected", "withdrawn"],
+        accepted: [],
+        offer: [],
+        confirmed: ["withdrawn"],
+        rejected: [],
+        withdrawn: []
+      };
+      var LABEL = { applying: "Applying", submitted: "Submitted",
+        interview: "Interviewing", offer: "Offer", accepted: "Selected",
+        confirmed: "Accepted", rejected: "Not selected", withdrawn: "Withdrawn" };
+      // Stages with a date he can set (applications.FOLLOW_UP_STAGES).
+      var FOLLOW_UP = ["submitted", "interview", "offer", "accepted"];
+      // Closed: Undo returns to the row's data-app-prior stage.
+      var CLOSED = ["rejected", "withdrawn"];
+      // No draft once the application is closed or in, and Selected or
+      // Offer is a decision to answer, not an application to write.
+      var NO_DRAFT = ["accepted", "confirmed", "rejected", "withdrawn"];
+      var rows = document.querySelectorAll(".row[data-app-stage]");
+      if (!rows.length) return;
+
+      // Reply-by reminder: an all-day Google Calendar event on the reply-by
+      // date, so it follows a date change without a rebuild.
+      function replyByUrl(title, day) {
+        var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day || "");
+        if (!m) return "";
+        var start = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+        var end = new Date(start.getTime() + 864e5);
+        function ymd(d) { return d.toISOString().slice(0, 10).replace(/-/g, ""); }
+        return "https://calendar.google.com/calendar/render?action=TEMPLATE" +
+          "&text=" + encodeURIComponent("Reply by: " + title) +
+          "&dates=" + ymd(start) + "/" + ymd(end) +
+          "&details=" + encodeURIComponent("Reply to this decision by the date shown.");
+      }
+
+      function paint(row, stage) {
+        stage = stage || "";
+        row.setAttribute("data-app-stage", stage);
+        var allowed = NEXT[stage] || [];
+        var deciding = stage === "accepted" || stage === "offer";
+        var closed = CLOSED.indexOf(stage) !== -1;
+        var followUp = row.querySelector('[data-action="app-follow-up"]');
+        row.querySelectorAll('[data-action="app-stage"]').forEach(function (b) {
+          b.hidden = allowed.indexOf(b.dataset.stage) === -1;
+        });
+        row.querySelectorAll("[data-decision]").forEach(function (b) {
+          b.hidden = !deciding;
+        });
+        var undo = row.querySelector("[data-undo]");
+        if (undo) {
+          undo.hidden = !closed;
+          undo.dataset.stage = row.getAttribute("data-app-prior") || "applying";
+        }
+        var group = row.querySelector(".menu-stage");
+        if (group) group.hidden = !allowed.length && !deciding && !closed &&
+          FOLLOW_UP.indexOf(stage) === -1;
+        row.querySelectorAll('[data-task="draft"]').forEach(function (el) {
+          el.hidden = el.hasAttribute("data-no-draft") || NO_DRAFT.indexOf(stage) !== -1;
+        });
+        // Selected and Accepted are settled, so "Not for me" no longer applies.
+        row.querySelectorAll('[data-action="dismiss"]').forEach(function (el) {
+          el.hidden = stage === "accepted" || stage === "confirmed";
+        });
+        // Thumbs are for suggestions; a tracked application is not one.
+        var rate = row.querySelector(".menu-rate");
+        if (rate) rate.hidden = stage !== "";
+        // The reminder on a tracked row: the reply-by date on Selected and
+        // Offer, nothing on the rest. Untracked rows keep the event reminder.
+        var remind = row.querySelector(".add-reminder");
+        if (remind) {
+          if (remind.dataset.plain === undefined) remind.dataset.plain = remind.getAttribute("href") || "";
+          if (!stage) {
+            remind.textContent = "Add reminder";
+            remind.setAttribute("href", remind.dataset.plain);
+            remind.hidden = false;
+          } else if (deciding) {
+            var href = replyByUrl((row.querySelector(".row-name") || {}).textContent,
+              followUp ? followUp.value : "");
+            remind.textContent = "Add reply-by reminder";
+            remind.setAttribute("href", href);
+            remind.hidden = !href;
+          } else {
+            remind.hidden = true;
+          }
+        } else if (deciding && followUp && followUp.value) {
+          remind = document.createElement("a");
+          remind.className = "menu-item add-reminder";
+          remind.setAttribute("role", "menuitem");
+          remind.target = "_blank";
+          remind.rel = "noopener";
+          remind.dataset.plain = "";
+          row.querySelector(".menu-stage").parentNode.insertBefore(remind, row.querySelector(".menu-stage"));
+          paint(row, stage);
+          return;
+        }
+        var stageLbl = row.querySelector(".menu-stage .menu-rate-lbl");
+        if (stageLbl) stageLbl.textContent = deciding ? "Your next step" : closed ? "Status" : "Mark as";
+        var date = row.querySelector(".menu-date");
+        if (date) {
+          date.hidden = FOLLOW_UP.indexOf(stage) === -1;
+          var lbl = date.querySelector('[data-role="follow-up-label"]');
+          if (lbl) lbl.textContent = deciding ? "Reply by" : "Follow up on";
+        }
+        var chip = row.querySelector(".app-stage");
+        if (!LABEL[stage]) { if (chip) chip.parentNode.removeChild(chip); return; }
+        if (!chip) {
+          var meta = row.querySelector(".row-meta");
+          if (!meta) return;
+          chip = document.createElement("span");
+          chip.className = "app-stage";
+          var after = meta.querySelector(".row-new");
+          meta.insertBefore(chip, after ? after.nextSibling : meta.firstChild);
+        }
+        chip.textContent = LABEL[stage];
+      }
+
+      Array.prototype.forEach.call(rows, function (row) {
+        paint(row, row.getAttribute("data-app-stage"));
+      });
+      // A draft moves an untracked row to applying (service/app.py); the draft
+      // button reports the new stage here so the row repaints without a reload.
+      document.addEventListener("briefing:stage", function (e) {
+        paint(e.detail.row, e.detail.stage);
+      });
+
+      var queue = Promise.resolve();
+      document.querySelectorAll('[data-action="app-stage"]').forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          var row = btn.closest(".row");
+          var itemId = btn.dataset.itemId;
+          if (!row || !itemId) return;
+          var before = row.getAttribute("data-app-stage") || "";
+          // Undo needs the open stage this closing move came from.
+          if (CLOSED.indexOf(btn.dataset.stage) !== -1 && before && CLOSED.indexOf(before) === -1) {
+            row.setAttribute("data-app-prior", before);
+          }
+          // His answer to a Selected or Offer row is settled: the row goes
+          // away. The server takes it off the page in the same write.
+          var decision = btn.hasAttribute("data-decision");
+          if (decision) row.classList.add("is-done");
+          var undoHide = function () {
+            paint(row, before);
+            if (decision) row.classList.remove("is-done");
+          };
+          paint(row, btn.dataset.stage);
+          queue = queue.then(function () {
+            return fetch("/applications/" + encodeURIComponent(itemId), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ stage: btn.dataset.stage, decided: decision })
+            });
+          }).then(function (res) {
+            if (!res.ok) { undoHide(); return; }
+            return res.json().then(function (rec) {
+              var input = row.querySelector('[data-action="app-follow-up"]');
+              if (input) input.value = rec.follow_up_on || "";
+              paint(row, row.getAttribute("data-app-stage"));
+              document.dispatchEvent(new CustomEvent("briefing:acted", { detail: { what: rec.label } }));
+            });
+          }).catch(undoHide);
+        });
+      });
+
+      // Undo of an application write (the shared bar, service/app.py /undo):
+      // the row takes back the stage and the follow-up date it had.
+      document.addEventListener("briefing:undone", function (e) {
+        var done = e.detail || {};
+        if (done.stage === undefined) return;
+        var row = document.querySelector('.row[data-item-id="' + done.id + '"]');
+        if (!row) return;
+        row.classList.remove("is-done");
+        var input = row.querySelector('[data-action="app-follow-up"]');
+        if (input) { input.value = done.follow_up_on || ""; input.defaultValue = input.value; }
+        paint(row, done.stage);
+      });
+
+      document.querySelectorAll('[data-action="app-follow-up"]').forEach(function (input) {
+        input.addEventListener("click", function (e) { e.stopPropagation(); });
+        input.addEventListener("change", function () {
+          var itemId = input.dataset.itemId;
+          if (!itemId) return;
+          var was = input.defaultValue;
+          queue = queue.then(function () {
+            return fetch("/applications/" + encodeURIComponent(itemId), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ follow_up_on: input.value || "" })
+            });
+          }).then(function (res) {
+            if (res.ok) {
+              input.defaultValue = input.value;
+              var row = input.closest(".row");
+              if (row) paint(row, row.getAttribute("data-app-stage"));
+              res.json().then(function (rec) {
+                document.dispatchEvent(new CustomEvent("briefing:acted", { detail: { what: rec.label } }));
+              });
+            }
+            else { input.value = was; }
+          }).catch(function () { input.value = was; });
+        });
+      });
+
+      // A same-day reload serves the page as rendered this morning; the
+      // stored stage is newer.
+      fetch("/applications").then(function (res) {
+        return res.ok ? res.json() : {};
+      }).then(function (stages) {
+        Array.prototype.forEach.call(rows, function (row) {
+          var s2 = (stages || {})[row.dataset.itemId];
+          if (s2 && s2 !== row.getAttribute("data-app-stage")) paint(row, s2);
+        });
+      }).catch(function () { });
+    })();
+
+    // ---- TRACK AN APPLICATION (POST /applications) ----------------------
+    // One the brief never showed. The server stores what was typed; the
+    // next run turns it into an opportunity row.
+    (function () {
+      var dialog = document.getElementById("sheet-track");
+      var opener = document.querySelector('[data-action="track-open"]');
+      if (!dialog || !opener) return;
+      var form = dialog.querySelector('[data-role="track-form"]');
+      var status = dialog.querySelector('[data-role="track-status"]');
+      var save = dialog.querySelector('[data-action="track-save"]');
+
+      opener.addEventListener("click", function () {
+        status.textContent = "";
+        status.classList.remove("is-error");
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "");
+        // No explicit field focus: on a phone it pops the keyboard and zooms
+        // the sheet before the reader has seen it. showModal() focuses the
+        // close button, which keeps keyboard users inside the dialog.
+      });
+
+      function submit() {
+        if (!form.reportValidity()) return;
+        var body = {};
+        ["title", "organization", "url", "deadline", "stage"].forEach(function (k) {
+          body[k] = form.elements[k].value;
+        });
+        save.disabled = true;
+        status.classList.remove("is-error");
+        status.textContent = "Saving\u2026";
+        fetch("/applications", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        }).then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (rec) {
+            if (!res.ok) {
+              throw new Error(typeof rec.detail === "string" ? rec.detail
+                              : "check the fields and try again");
+            }
+            return rec;
+          });
+        }).then(function (rec) {
+          status.textContent = "Tracking \u201c" + rec.manual.title +
+            "\u201d. It shows up from the next brief.";
+          form.reset();
+        }).catch(function (err) {
+          status.classList.add("is-error");
+          status.textContent = "Not saved: " + err.message;
+        }).then(function () { save.disabled = false; });
+      }
+      save.addEventListener("click", submit);
+      form.addEventListener("submit", function (e) { e.preventDefault(); submit(); });
+    })();
+
+    // ---- SOURCES (GET/PUT /sources, service/sources.py) ------------------
+    // What feeds the brief, when each last ran, and per source an on/off
+    // switch plus how often it refreshes. The timers read the saved
+    // settings; nothing here fetches anything.
+    (function () {
+      var dialog = document.getElementById("sheet-sources");
+      var opener = document.querySelector('[data-action="sources-open"]');
+      if (!dialog || !opener) return;
+      var body = dialog.querySelector('[data-role="sources-body"]');
+      var status = dialog.querySelector('[data-role="sources-status"]');
+      var save = dialog.querySelector('[data-action="sources-save"]');
+      var rows = [], intervals = [];
+
+      function say(text, isError) {
+        status.textContent = text;
+        status.classList.toggle("is-error", !!isError);
+      }
+      function every(h) { return h >= 24 ? "Daily" : "Every " + h + " h"; }
+      function when(iso) {
+        if (!iso) return "never";
+        var d = new Date(iso);
+        if (isNaN(d)) return iso;
+        var today = new Date(), tmr = new Date(today.getTime() + 864e5);
+        var day = d.toDateString() === today.toDateString() ? "today"
+          : d.toDateString() === tmr.toDateString() ? "tomorrow"
+          : d.toLocaleDateString([], { month: "short", day: "numeric" });
+        return day + " " + d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      }
+      function chip(label, pressed, onClick, extra) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "chip" + (extra ? " " + extra : "");
+        b.textContent = label;
+        b.setAttribute("aria-pressed", pressed ? "true" : "false");
+        b.addEventListener("click", onClick);
+        return b;
+      }
+      function draw() {
+        body.textContent = "";
+        rows.forEach(function (r) {
+          var box = document.createElement("div");
+          box.className = "pq src" + (r.enabled ? "" : " is-off");
+          var label = document.createElement("div");
+          label.className = "pq-label";
+          label.textContent = r.label;
+          var help = document.createElement("div");
+          help.className = "pq-help";
+          help.textContent = r.feeds;
+          var info = document.createElement("div");
+          info.className = "src-when";
+          if (r.ok === false && r.error) {
+            info.classList.add("is-error");
+            info.textContent = "Last try failed " + when(r.last_attempt) + ": " + r.error;
+          } else {
+            info.textContent = "Updated " + when(r.last_success) +
+              (r.enabled && r.next_due ? " \u00b7 next " + when(r.next_due) : "");
+          }
+          var onoff = document.createElement("div");
+          onoff.className = "pq-opts";
+          onoff.setAttribute("role", "group");
+          onoff.setAttribute("aria-label", r.label + " on or off");
+          onoff.appendChild(chip("On", r.enabled, function () { r.enabled = true; draw(); }));
+          onoff.appendChild(chip("Off", !r.enabled, function () { r.enabled = false; draw(); }, "chip-never"));
+          box.appendChild(label);
+          box.appendChild(help);
+          box.appendChild(info);
+          box.appendChild(onoff);
+          if (r.enabled) {
+            var freq = document.createElement("div");
+            freq.className = "pq-opts";
+            freq.setAttribute("role", "group");
+            freq.setAttribute("aria-label", "How often " + r.label + " refreshes");
+            intervals.forEach(function (h) {
+              freq.appendChild(chip(every(h), r.interval_hours === h, function () {
+                r.interval_hours = h; draw();
+              }));
+            });
+            box.appendChild(freq);
+          }
+          body.appendChild(box);
+        });
+      }
+      function load() {
+        say("Loading\u2026");
+        return fetch("/sources").then(function (res) {
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        }).then(function (data) {
+          rows = data.sources || [];
+          intervals = data.intervals || [];
+          draw();
+          say("");
+        }).catch(function (err) { say("Could not load sources: " + err.message, true); });
+      }
+      opener.addEventListener("click", function () {
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "");
+        load();
+      });
+      save.addEventListener("click", function () {
+        var settings = {};
+        rows.forEach(function (r) {
+          settings[r.name] = { enabled: r.enabled, interval_hours: r.interval_hours };
+        });
+        save.disabled = true;
+        say("Saving\u2026");
+        fetch("/sources", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ settings: settings })
+        }).then(function (res) {
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        }).then(function (data) {
+          rows = data.sources || rows;
+          draw();
+          say("Saved. The next refresh follows these settings.");
+        }).catch(function (err) {
+          say("Not saved: " + err.message, true);
+        }).then(function () { save.disabled = false; });
+      });
+    })();
+
+    // ---- NOTIFICATIONS (GET/PUT /notify/settings, service/notify.py) -----
+    // Which events the app and phone announce, the quiet hours, and the
+    // daily cap on phone pushes.
+    (function () {
+      var dialog = document.getElementById("sheet-notify");
+      var opener = document.querySelector('[data-action="notify-open"]');
+      if (!dialog || !opener) return;
+      var body = dialog.querySelector('[data-role="notify-body"]');
+      var status = dialog.querySelector('[data-role="notify-status"]');
+      var save = dialog.querySelector('[data-action="notify-save"]');
+      var cfg = null;
+      var HELP = {
+        deadline: "Due in under 24 hours (exams and dated opportunities again at 3 hours)",
+        grade: "A course's Canvas grade posted or changed",
+        opportunity: "A new opportunity or lead on the brief",
+        followup: "An application follow-up date is today",
+        source: "Canvas or Handshake keeps failing (usually an expired login)",
+        brief: "The morning brief is ready"
+      };
+      function say(text, isError) {
+        status.textContent = text;
+        status.classList.toggle("is-error", !!isError);
+      }
+      function chip(label, pressed, onClick, extra) {
+        var b = document.createElement("button");
+        b.type = "button";
+        b.className = "chip" + (extra ? " " + extra : "");
+        b.textContent = label;
+        b.setAttribute("aria-pressed", pressed ? "true" : "false");
+        b.addEventListener("click", onClick);
+        return b;
+      }
+      function timeField(label, idx) {
+        var wrap = document.createElement("label");
+        wrap.className = "pq-help";
+        wrap.textContent = label + " ";
+        var input = document.createElement("input");
+        input.type = "time";
+        input.value = cfg.quiet[idx];
+        input.addEventListener("change", function () { if (input.value) cfg.quiet[idx] = input.value; });
+        wrap.appendChild(input);
+        return wrap;
+      }
+      function draw() {
+        body.textContent = "";
+        Object.keys(cfg.labels).forEach(function (k) {
+          var box = document.createElement("div");
+          box.className = "pq src" + (cfg.kinds[k] ? "" : " is-off");
+          var label = document.createElement("div");
+          label.className = "pq-label";
+          label.textContent = cfg.labels[k];
+          var help = document.createElement("div");
+          help.className = "pq-help";
+          help.textContent = HELP[k] || "";
+          var onoff = document.createElement("div");
+          onoff.className = "pq-opts";
+          onoff.setAttribute("role", "group");
+          onoff.setAttribute("aria-label", cfg.labels[k] + " on or off");
+          onoff.appendChild(chip("On", cfg.kinds[k], function () { cfg.kinds[k] = true; draw(); }));
+          onoff.appendChild(chip("Off", !cfg.kinds[k], function () { cfg.kinds[k] = false; draw(); }, "chip-never"));
+          box.appendChild(label); box.appendChild(help); box.appendChild(onoff);
+          body.appendChild(box);
+        });
+        var quiet = document.createElement("div");
+        quiet.className = "pq";
+        var ql = document.createElement("div");
+        ql.className = "pq-label";
+        ql.textContent = "Quiet hours";
+        var qh = document.createElement("div");
+        qh.className = "pq-help";
+        qh.textContent = "No phone pushes in this window. They are held and sent together afterwards.";
+        quiet.appendChild(ql); quiet.appendChild(qh);
+        quiet.appendChild(timeField("From", 0));
+        quiet.appendChild(timeField("Until", 1));
+        var cap = document.createElement("div");
+        cap.className = "pq-opts";
+        cap.setAttribute("role", "group");
+        cap.setAttribute("aria-label", "Most phone pushes per day");
+        [3, 6, 10, 20].forEach(function (n) {
+          cap.appendChild(chip(n + " a day", cfg.cap === n, function () { cfg.cap = n; draw(); }));
+        });
+        quiet.appendChild(cap);
+        body.appendChild(quiet);
+      }
+      opener.addEventListener("click", function () {
+        if (typeof dialog.showModal === "function") dialog.showModal();
+        else dialog.setAttribute("open", "");
+        say("Loading\u2026");
+        fetch("/notify/settings").then(function (res) {
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        }).then(function (data) { cfg = data; draw(); say(""); })
+          .catch(function (err) { say("Could not load notifications: " + err.message, true); });
+      });
+      save.addEventListener("click", function () {
+        if (!cfg) return;
+        save.disabled = true;
+        say("Saving\u2026");
+        fetch("/notify/settings", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kinds: cfg.kinds, quiet: cfg.quiet, cap: cfg.cap })
+        }).then(function (res) {
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        }).then(function (data) { cfg = data; draw(); say("Saved."); })
+          .catch(function (err) { say("Not saved: " + err.message, true); })
+          .then(function () { save.disabled = false; });
+      });
+    })();
 
     // Brief v2: "since you last looked". POST /visit returns the previous
     // visit (the server keeps one baseline per 30-minute session, so a
@@ -1546,7 +2314,8 @@
             b.textContent = chunk;
             parent.appendChild(b);
           } else {
-            parent.appendChild(document.createTextNode(chunk));
+            // A draft answer carries its Google Doc's link.
+            linkify(parent, chunk);
           }
         });
       }
@@ -1617,7 +2386,7 @@
     // not a radio group); this only makes them reachable.
     function menuItems(menu) {
       return Array.prototype.filter.call(
-        menu.querySelectorAll(".menu-item, .rate"),
+        menu.querySelectorAll(".menu-item, .rate, .menu-date input"),
         function (el) { return !el.disabled && el.offsetParent !== null; });
     }
 
@@ -1754,7 +2523,8 @@
       // .tbl-text instead, with no label to peel off (the course tag was
       // never glued onto that text the way .row-title glues it in a real
       // row, so there's nothing to strip).
-      var t = row.querySelector(".row-title") || row.querySelector(".tbl-text");
+      var t = row.querySelector(".row-title") || row.querySelector(".tbl-name")
+        || row.querySelector(".tbl-text");
       if (!t) return "Detail";
       var name = t.textContent.trim();
       if (!row.classList.contains("row")) return name || "Detail";
@@ -1935,6 +2705,14 @@
       var rowName = rowTitleFor(btn);
       if (rowName && rowName !== "Detail") {
         btn.setAttribute("aria-label", "Actions for " + rowName);
+        // On a phone the menu is a sheet far from its row: it names the
+        // item it acts on (shown only there, CSS .row-menu-title).
+        menu.setAttribute("aria-label", rowName);
+        var head = document.createElement("div");
+        head.className = "row-menu-title";
+        head.setAttribute("aria-hidden", "true");
+        head.textContent = rowName;
+        menu.insertBefore(head, menu.firstChild);
       }
       btn.addEventListener("click", function (e) {
         e.stopPropagation();
@@ -2210,6 +2988,29 @@
           var answer = typeof data.answer === "string" ? data.answer : "";
           if (!answer.trim()) throw new Error("Came back empty — try again.");
           paint(answer, !!data.saved, data.label);
+          if (task === "draft") {
+            // A draft adds "Open my draft" and moves the row to applying,
+            // both live, so the menu matches what the server now holds.
+            var draftRow = btn.closest(".row");
+            if (draftRow && /^https:\/\//.test(data.draft_url || "")) {
+              var draftLink = draftRow.querySelector(".draft-link");
+              if (!draftLink) {
+                draftLink = document.createElement("a");
+                draftLink.className = "menu-item draft-link";
+                draftLink.setAttribute("role", "menuitem");
+                draftLink.target = "_blank";
+                draftLink.rel = "noopener";
+                draftLink.textContent = "Open my draft";
+                btn.parentNode.insertBefore(draftLink, btn);
+              }
+              draftLink.href = data.draft_url;
+              draftLink.hidden = false;
+            }
+            if (draftRow && data.stage) {
+              document.dispatchEvent(new CustomEvent("briefing:stage",
+                { detail: { row: draftRow, stage: data.stage } }));
+            }
+          }
         }).catch(function (err) {
           expand.classList.remove("is-loading");
           expand.setAttribute("aria-busy", "false");
@@ -2294,7 +3095,12 @@
     // Only now hide the non-default panes. Until this runs they are all
     // visible, which is the correct degraded state.
     show(paneExists("pane-today") ? "pane-today" : panes[0].id, false);
+  })();
 
+  // Its own scope: the pane code above returns early on a page without
+  // tabs (every page since the 2026-09-17 redesign), and while print
+  // expansion lived inside it, it never ran.
+  (function () {
     // ---- THE OVERFLOW DISCLOSURE HAS TO BE OPEN ON PAPER ------------------
     // The print stylesheet carries `details.more > * { display: revert }` for
     // this, and it does not work in current engines: a closed details element
@@ -2331,6 +3137,38 @@
       };
       if (mq.addEventListener) mq.addEventListener("change", onPrintChange);
       else if (mq.addListener) mq.addListener(onPrintChange);
+    }
+
+    // ---- WHAT HAS ALREADY HAPPENED TODAY ----------------------------------
+    // The page is read hours after it is built. A calendar row whose
+    // data-ends has passed is greyed (a travel-gap note before it goes), and
+    // this re-checks every minute so an open tab keeps up.
+    function markPast() {
+      var now = Date.now();
+      Array.prototype.forEach.call(document.querySelectorAll(".t-row[data-ends]"),
+        function (r) {
+          var ends = Date.parse(r.getAttribute("data-ends"));
+          if (!isNaN(ends)) r.classList.toggle("is-past", ends <= now);
+        });
+    }
+    markPast();
+    setInterval(markPast, 60000);
+
+    // A page read on a later day (the app's offline copy, or builds that
+    // stopped) says so, since every "today" on it means its own day.
+    var stale = document.querySelector('[data-role="stale"]');
+    var built = stale && stale.getAttribute("data-built");
+    if (built && /^\d{4}-\d{2}-\d{2}$/.test(built)) {
+      var now = new Date();
+      var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+      var today = now.getFullYear() + "-" + pad(now.getMonth() + 1) + "-" + pad(now.getDate());
+      if (built < today) {
+        var on = new Date(built + "T12:00:00");
+        stale.textContent = "This briefing is from " + on.toLocaleDateString([], {
+          weekday: "long", month: "short", day: "numeric" }) +
+          "; nothing on it has been updated since.";
+        stale.hidden = false;
+      }
     }
   })();
 </script>
@@ -2401,10 +3239,11 @@
     var PREF_SCHEMA = [
       { id: "requirements", type: "requirements",
         label: "What are you actually trying to make happen?",
-        help: "Each of these is a standing question the briefing goes looking for — " +
-              "not a topic filter. \"Get into a research group by spring\" is one. " +
-              "With none set, the briefing only reports what already reached you, " +
-              "and the Leads and Opportunities panes stay empty.",
+        help: "Each goal is searched for on the web, one search per program you " +
+              "name, about once a week; what turns up arrives as Leads. Name " +
+              "specific programs (\"Acme Fellows internship\", \"UMD FIRE\"): a " +
+              "goal with none searches broadly and finds generic pages. With " +
+              "none set, the briefing only reports what already reached you.",
         doc: "requirements" },
       { id: "coming_up_max", type: "single",
         label: "How many rows should \"Coming up\" show before the rest, at most?",
@@ -2499,6 +3338,11 @@
     var answers = {};
     var customText = "";
     var requirements = [];
+    // Things to watch (prefs/watches): named by him, checked once a day by
+    // the run. Separate from requirements, which are goals the run searches
+    // for and leads come from.
+    var watchList = [];
+    var watchWrap = null;
     var loaded = false;
 
     // An id is minted ONCE, on creation, and never re-derived from the
@@ -2698,7 +3542,7 @@
               var stmt = document.createElement("input");
               stmt.className = "req-stmt";
               stmt.type = "text";
-              stmt.maxLength = 140;
+              stmt.maxLength = 240;
               stmt.value = req.statement || "";
               stmt.placeholder = "e.g. Get into a research group by spring";
               stmt.setAttribute("aria-label", "What you are trying to make happen");
@@ -2740,15 +3584,15 @@
               sub.className = "req-sub";
               var kwl = document.createElement("span");
               kwl.className = "req-lbl";
-              kwl.textContent = "Words to watch:";
+              kwl.textContent = "Programs to search for:";
               sub.appendChild(kwl);
-              var kw = document.createElement("input");
+              var kw = document.createElement("textarea");
               kw.className = "req-kw";
-              kw.type = "text";
-              kw.maxLength = 200;
+              kw.rows = 2;
+              kw.maxLength = 600;
               kw.value = (req.keywords || []).join(", ");
-              kw.placeholder = "lab, reu, research assistant";
-              kw.setAttribute("aria-label", "Words to watch for this requirement");
+              kw.placeholder = "Acme Fellows internship, UMD FIRE";
+              kw.setAttribute("aria-label", "Programs to search for, separated by commas");
               kw.addEventListener("input", function () { req.keywords = splitList(kw.value); });
               sub.appendChild(kw);
               box.appendChild(sub);
@@ -2846,8 +3690,215 @@
         }
         body.appendChild(wrap);
       });
+      watchWrap = document.createElement("div");
+      body.appendChild(watchWrap);
+      drawWatches();
     }
- 
+
+    // ---- THINGS WATCHING (GET /watch-hits) -------------------------------
+    // Confirmed hits from the daily watch check. Read-only here; the section
+    // stays hidden until there is a hit.
+    (function () {
+      var section = document.getElementById("section-watching");
+      var list = document.getElementById("watch-hits");
+      if (!section || !list) return;
+      fetch("/watch-hits").then(function (res) {
+        return res.ok ? res.json() : { hits: [] };
+      }).then(function (data) {
+        var hits = (data && data.hits) || [];
+        if (!hits.length) return;
+        section.style.display = "";
+        // Drawn like the other cards in a .stack (Opportunities).
+        function day(iso) {
+          var d = new Date(String(iso || "") + "T12:00:00");
+          return isNaN(d) ? String(iso || "") : d.toLocaleDateString("en-US",
+            { weekday: "short", month: "numeric", day: "numeric" }).replace(",", "");
+        }
+        hits.forEach(function (h) {
+          var box = document.createElement("div");
+          box.className = "row";
+          var body = document.createElement("div");
+          var head = document.createElement("div");
+          head.className = "row-title";
+          var name = document.createElement("span");
+          name.className = "row-name";
+          name.textContent = h.title;
+          head.appendChild(name);
+          body.appendChild(head);
+          var finding = document.createElement("div");
+          finding.className = "row-detail";
+          finding.textContent = h.finding;
+          body.appendChild(finding);
+          var meta = document.createElement("div");
+          meta.className = "row-meta";
+          meta.textContent = "Found " + day(h.found_on);
+          if (h.url) {
+            var open = document.createElement("a");
+            open.className = "t-link";
+            open.href = h.url;
+            open.target = "_blank";
+            open.rel = "noopener";
+            open.textContent = "Open the page";
+            meta.appendChild(document.createTextNode(" \u00b7 "));
+            meta.appendChild(open);
+          }
+          body.appendChild(meta);
+          box.appendChild(body);
+          list.appendChild(box);
+        });
+      }).catch(function () { });
+    })();
+
+    // A watch id is minted once, here, and kept: the run keys its daily-check
+    // record and its brief row on it. Lowercase, so it passes the server's
+    // id rule (service/watches.py).
+    function mintWatchId() {
+      return "w" + Math.random().toString(36).slice(2, 10);
+    }
+
+    // The list he names: one line per thing, checked once a day. A confirmed
+    // hit joins Opportunities. Rows are redrawn in place; typing only updates
+    // the working copy, so focus and text survive.
+    function drawWatches() {
+      if (!watchWrap) return;
+      watchWrap.textContent = "";
+      watchWrap.className = "pq";
+      var lab = document.createElement("div");
+      lab.className = "pq-label";
+      lab.textContent = "Things to watch";
+      watchWrap.appendChild(lab);
+      var help = document.createElement("div");
+      help.className = "pq-help";
+      help.textContent = "Name something specific: a product that might go on sale, a posting that might open. The briefing checks each one once a day on the web and puts a confirmed hit under Things watching. Add up to 3 pages to check for one watch. Up to 12 watches.";
+      watchWrap.appendChild(help);
+
+      if (!watchList.length) {
+        var none = document.createElement("div");
+        none.className = "req-empty";
+        none.textContent = "Nothing set yet.";
+        watchWrap.appendChild(none);
+      }
+      watchList.forEach(function (w, idx) {
+        var box = document.createElement("div");
+        box.className = "req" + (w.active ? "" : " is-off");
+
+        var head = document.createElement("div");
+        head.className = "req-head";
+        var what = document.createElement("input");
+        what.className = "req-stmt";
+        what.type = "text";
+        what.maxLength = 140;
+        what.value = w.what;
+        what.placeholder = "e.g. Nikon Z50 on sale at B&H";
+        what.setAttribute("aria-label", "Thing to watch");
+        what.addEventListener("input", function () { w.what = what.value; });
+        head.appendChild(what);
+
+        var onoff = document.createElement("button");
+        onoff.type = "button";
+        onoff.className = "chip";
+        onoff.textContent = w.active ? "On" : "Paused";
+        onoff.setAttribute("aria-pressed", w.active ? "true" : "false");
+        onoff.addEventListener("click", function () {
+          w.active = !w.active;
+          drawWatches();
+        });
+        head.appendChild(onoff);
+
+        var del = document.createElement("button");
+        del.type = "button";
+        del.className = "act req-del";
+        del.textContent = "Remove";
+        del.setAttribute("aria-label", "Remove this watch");
+        del.addEventListener("click", function () {
+          watchList = watchList.slice(0, idx).concat(watchList.slice(idx + 1));
+          drawWatches();
+        });
+        head.appendChild(del);
+        box.appendChild(head);
+
+        // Pages to check: optional, up to 3. Each is its own row so he can
+        // clear one without retyping the rest.
+        w.urls.forEach(function (u, pi) {
+          var link = document.createElement("input");
+          link.className = "req-stmt";
+          link.type = "url";
+          link.maxLength = 500;
+          link.value = u;
+          link.placeholder = "Page to check (optional, https://)";
+          link.setAttribute("aria-label", "Page to check for this watch");
+          link.style.marginTop = "6px";
+          link.style.width = "100%";
+          link.addEventListener("input", function () { w.urls[pi] = link.value.trim(); });
+          box.appendChild(link);
+        });
+        // Product pages the daily check found: it stores them, so this is
+        // read-only here.
+        if (w.found && w.found.length) {
+          var fl = document.createElement("div");
+          fl.className = "pq-help";
+          fl.style.marginTop = "6px";
+          fl.appendChild(document.createTextNode("Product pages found: "));
+          w.found.forEach(function (f, fi) {
+            if (fi) fl.appendChild(document.createTextNode(", "));
+            var fa = document.createElement("a");
+            fa.href = f.url;
+            fa.target = "_blank";
+            fa.rel = "noopener";
+            fa.textContent = f.name;
+            fl.appendChild(fa);
+          });
+          box.appendChild(fl);
+        }
+        // Last daily check: its date, and each reason it could not settle
+        // this watch, so he knows the step to take (blocked site, no product
+        // page, zip mismatch, out of stock).
+        if (w.status && w.status.date) {
+          var last = document.createElement("div");
+          last.className = "pq-help";
+          last.style.marginTop = "6px";
+          last.textContent = "Last checked " + w.status.date + ". Checked once a day, so a change made today is checked tomorrow.";
+          box.appendChild(last);
+          w.status.notes.forEach(function (n) {
+            var need = document.createElement("div");
+            need.className = "pq-help";
+            need.style.fontWeight = "600";
+            need.textContent = "Needs a step: " + n;
+            box.appendChild(need);
+          });
+        }
+        if (w.urls.length < 3) {
+          var addPage = document.createElement("button");
+          addPage.type = "button";
+          addPage.className = "act";
+          addPage.textContent = "Add a page to check";
+          addPage.style.marginTop = "6px";
+          addPage.addEventListener("click", function () {
+            w.urls = w.urls.concat([""]);
+            drawWatches();
+            var links = watchWrap.querySelectorAll('input[aria-label="Page to check for this watch"]');
+            if (links.length) links[links.length - 1].focus();
+          });
+          box.appendChild(addPage);
+        }
+
+        watchWrap.appendChild(box);
+      });
+
+      var add = document.createElement("button");
+      add.type = "button";
+      add.className = "act req-add";
+      add.textContent = "Add a thing to watch";
+      add.disabled = watchList.length >= 12;
+      add.addEventListener("click", function () {
+        watchList = watchList.concat([{ id: mintWatchId(), what: "", urls: [], active: true }]);
+        drawWatches();
+        var inputs = watchWrap.querySelectorAll(".req-stmt");
+        if (inputs.length >= 2) inputs[inputs.length - 2].focus();
+      });
+      watchWrap.appendChild(add);
+    }
+
     // §6.2's `db` capability doesn't exist under this service's plain
     // FastAPI hosting -- replaced 2026-09-16 with a same-origin REST shim
     // over `service/app.py`'s own `/prefs/*` endpoints (see the first script
@@ -2899,7 +3950,8 @@
         return Promise.all([
           db.doc("prefs/quiz").get().catch(function () { return null; }),
           db.doc("prefs/custom").get().catch(function () { return null; }),
-          db.doc("prefs/requirements").get().catch(function () { return null; })
+          db.doc("prefs/requirements").get().catch(function () { return null; }),
+          db.doc("prefs/watches").get().catch(function () { return null; })
         ]).then(function (snaps) {
           var q = snaps[0] && snaps[0].exists ? (snaps[0].data() || {}) : null;
           var c = snaps[1] && snaps[1].exists ? (snaps[1].data() || {}) : null;
@@ -2986,6 +4038,30 @@
             });
           }
           if (c && typeof c.text === "string") customText = c.text;
+          var wt = snaps[3] && snaps[3].exists ? (snaps[3].data() || {}) : null;
+          if (wt && Array.isArray(wt.entries)) {
+            watchList = wt.entries.filter(function (e) {
+              return e && typeof e === "object";
+            }).map(function (e) {
+              return {
+                id: typeof e.id === "string" && e.id ? e.id : mintWatchId(),
+                what: typeof e.what === "string" ? e.what : "",
+                urls: Array.isArray(e.urls) ? e.urls.filter(function (u) {
+                  return typeof u === "string";
+                }) : [],
+                found: Array.isArray(e.found) ? e.found.filter(function (f) {
+                  return f && typeof f.name === "string" && typeof f.url === "string";
+                }) : [],
+                status: e.status && typeof e.status === "object" ? {
+                  date: typeof e.status.date === "string" ? e.status.date : "",
+                  notes: Array.isArray(e.status.notes) ? e.status.notes.filter(function (n) {
+                    return typeof n === "string";
+                  }) : []
+                } : { date: "", notes: [] },
+                active: e.active !== false
+              };
+            });
+          }
           setStatus(q || c || rq ? "Loaded your saved preferences."
                                   : "No preferences saved yet — these are the defaults.");
         }).catch(function () {
@@ -3000,6 +4076,15 @@
     }
  
     function save() {
+      var badLink = watchList.some(function (w) {
+        return (w.what || "").trim() && (w.urls || []).some(function (u) {
+          return u && u.indexOf("https://") !== 0;
+        });
+      });
+      if (badLink) {
+        setStatus("A watch link must start with https://.", true);
+        return Promise.resolve();
+      }
       saveBtn.disabled = true;
       setStatus("Saving…");
       // The two documents are written independently and reported on
@@ -3027,15 +4112,25 @@
                      quiet_after_days: parseInt(r.quiet_after_days, 10) || 30,
                      active: r.active !== false };
           });
+        var watchOut = watchList
+          .filter(function (w) { return (w.what || "").trim(); })
+          .map(function (w) {
+            return { id: w.id, what: w.what.trim(),
+                     urls: (w.urls || []).map(function (u) { return u.trim(); })
+                                         .filter(function (u) { return u; }),
+                     active: w.active !== false };
+          });
         return Promise.all([
           put("prefs/quiz", { version: VERSION, updated_at: now, answers: answers }),
           put("prefs/custom", { version: VERSION, updated_at: now, text: customText }),
-          put("prefs/requirements", { version: VERSION, updated_at: now, entries: reqOut })
+          put("prefs/requirements", { version: VERSION, updated_at: now, entries: reqOut }),
+          put("prefs/watches", { version: VERSION, updated_at: now, entries: watchOut })
         ]);
       }).then(function (failed) {
         var NAMES = { "prefs/quiz": "your answers",
                       "prefs/custom": "the custom instructions",
-                      "prefs/requirements": "your requirements" };
+                      "prefs/requirements": "your requirements",
+                      "prefs/watches": "your things to watch" };
         var bad = failed.filter(function (x) { return x; });
         if (!bad.length) {
           setStatus("Saved. Tomorrow's briefing will use these.");

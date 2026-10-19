@@ -31,10 +31,12 @@ src_render = open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # TEMPLATE, which is what this list is compared against.
 # Rewritten 2026-09-17 for the redesigned page: the design's ten headings, in
 # page order. The campus heading's first spelling stands in for its slot.
+# Reordered 2026-10-10: obligations (standing, further out) before the optional
+# tier (campus, opportunities, watching, leads).
 GATE_LABELS = ["Today — Due", "Today — on your calendar",
                "Needs your attention", "What changed", "This week",
-               "Opportunities", "Today — around campus",
-               "Where you stand", "Further out",
+               "Where you stand", "Further out", "Today — around campus",
+               "Opportunities", "Things watching",
                "Leads — unconfirmed, worth one look", "What I can't see"]
 
 # Resolve everything against THIS file's directory. The suite used to open
@@ -439,7 +441,7 @@ def day_spec():
             {"label": "Announcement", "text": "Quiz 1 solution",
              "url": "https://umd.instructure.com/courses/1/discussion_topics/2",
              "summary": "Solutions to Quiz 1 are posted under Files."},
-            {"label": "Posted", "text": "141-f26-8-inverses",
+            {"label": "Posted", "text": "001-f26-8-inverses",
              "url": "https://umd.instructure.com/courses/1/files/3"}]}],
         "coverage": ["Gradescope is not connected, so its deadlines are invisible."],
         "portfolio": ["28 of 120 credits toward the CS major."],
@@ -468,6 +470,9 @@ check("preferences form reachable (footer link opens the dialog)",
 check("detail dialog present", 'id="sheet-detail"' in out
       and 'data-role="detail-body"' in out)
 check("four script blocks survive splicing", len(re.findall(r"<script>", out)) == 4)
+check("the page carries its own date for the read-on-a-later-day notice",
+      re.search(r'data-role="stale" data-built="\d{4}-\d{2}-\d{2}" hidden', out)
+      is not None)
 check("title is dated", "<title>UMD Daily Briefing — September 7, 2026</title>" in out)
 
 # --- the masthead ----------------------------------------------------------
@@ -564,6 +569,17 @@ check("FURTHER_MORE_LABEL names what's hidden as informational",
 check("a non-fyi further-out item never triggers the disclosure",
       '<details class="more further-more">' not in out)
 
+# --- events dated today are never Due cards (2026-09-29) --------------------
+_ev_today = {"id": "umd-kits-gbm-2026-09-07", "kind": "event", "course_class": "umd",
+             "course_label": "UMD", "title": "Kits GBM", "detail": "Make kits.",
+             "date": "2026-09-07", "add_reminder_url": "", "ai_actions": [],
+             "times_surfaced": 0, "expand_context": "UMD — event: Kits GBM"}
+_ev_out, _ev_probs = build(dict(SPEC, sections=dict(
+    SPEC["sections"], coming_up=SPEC["sections"]["coming_up"] + [_ev_today])), TPL)
+check("an event dated today stays out of Today — Due",
+      "umd-kits-gbm-2026-09-07" not in [r for r, _ in RB._rows(_ev_out, "section-today")],
+      _ev_probs)
+
 # --- around campus ---------------------------------------------------------
 _camp = sec("section-campus")
 check("campus heading says Today when any event is today",
@@ -608,7 +624,8 @@ check("Where you stand lists the next thing per course, in the design's order",
       == ["ENGL001", "ECON001", "MATH001", "PHIL001", "CMSC001", "CS-Advising"],
       re.findall(r'<span class="course-tag [a-z]+">([^<]*)</span>', _stand))
 check("a course with nothing upcoming but something overdue says so",
-      re.search(r"Problem Set 2 · Due Sep 4; no submission confirmation was seen</p>"
+      re.search(r"Problem Set 2 · Due Sep 4; no submission confirmation was seen</span>"
+                r'\s*<span class="tbl-grade">[^<]*</span></p>'
                 r'\s*<span class="tbl-when">overdue', _stand))
 check("standing lines' own .tbl-row carries data-ref, never a second data-item-id",
       not re.search(r'<div class="tbl-row"[^>]*data-item-id', _stand)
@@ -622,6 +639,10 @@ check("portfolio notes join the standing table", "28 of 120 credits" in _stand)
 check("a course's grade readout joins its standing line, grouped row included",
       "91.7% (2 of 36 graded)" in _stand
       and "Weekly Participation posts" in _stand)
+check("the course grade is its own line under the item, not a tail on its title",
+      re.search(r'<span class="tbl-grade">Course grade 91\.7% \(2 of 36 graded\)</span>',
+                _stand)
+      and not re.search(r'class="tbl-name">[^<]*course grade', _stand, re.I))
 check("a course with no grade data gets no grade suffix at all",
       "%" not in re.search(r"Rhetorical Analysis draft[^<]*", _stand).group(0))
 check("check 31 fails a page with more portfolio notes than the run's cap",
@@ -639,7 +660,7 @@ _quiet, _qp = build({"today": "2026-09-11", "scalars": {
 check("a quiet day is gate-clean", not _qp, _qp)
 check("a quiet day keeps its mandatory sections, each with its note",
       all(n in _quiet for n in EMPTY_NOTES.values())
-      and _quiet.count('class="section is-empty"') == 3)
+      and _quiet.count('class="section is-empty"') == 4)
 check("a quiet day drops every optional section outright",
       all(('id="%s"' % s) not in _quiet for s in RB.OPTIONAL_SECTIONS.values()))
 check("a quiet week is five dashed columns",
@@ -726,7 +747,7 @@ faults = [
      out.replace('<details class="more attn-more">', '<div class="x">', 1)
         .replace("</details>", "</div>", 1), "29"),
     ("a lead row moved out of Leads",
-     out.replace('<div class="section" id="section-leads">', '<div class="section" id="section-lx">'), "24"),
+     out.replace('<div class="section" id="section-leads"', '<div class="section" id="section-lx"'), "24"),
 ]
 for name, broken, code in faults:
     probs = validate(broken, TPL, ITEMS)
@@ -1109,8 +1130,9 @@ check("the body column is the same 1040px content-box",
       ".wrap { box-sizing: content-box; max-width: 1040px; margin: 0 auto; padding: 0 40px; }" in _css)
 check("the TLDR is the 34px serif headline", re.search(
       r"\.tldr \{ font-family: var\(--serif\); font-size: 34px; line-height: 1\.28;", _css))
-check("today's coursework is a two-up card grid",
-      ".cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }" in _css)
+# 2026-10-10: auto-fit, two columns at most; a lone card fills the width.
+check("today's coursework is a card grid, two-up at most",
+      ".cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 14px; }" in _css)
 check("this week is five equal columns", "grid-template-columns: repeat(5, minmax(0, 1fr))" in _css)
 check("the campus panel's time column is 96px",
       "grid-template-columns: 96px 1fr; gap: 14px; padding: 11px 20px;" in _css)
@@ -1521,3 +1543,103 @@ if FAILURES:
     print("FAILED (%d): %s" % (len(FAILURES), ", ".join(FAILURES)))
     sys.exit(1)
 print("All checks passed.")
+
+
+def test_calendar_extras_need_interest_and_are_labelled_suggested():
+    import render_briefing as r
+    liked = {"relevance": {"score": 11, "evidence": "include", "why": "Matches your interests (finance)"}}
+    assert r._suggestion_why(liked) == "Matches your interests (finance)"
+    assert r._suggestion_why({}) == ""
+    assert r._suggestion_why({"relevance": {"score": 0, "evidence": "consider"}}) == ""
+    html = r._build_schedule([], [r._as_schedule_entry(dict(liked, title="Talk", time="17:00"))])
+    assert "is-suggested" in html and "Suggested for you: Matches your interests" in html
+
+
+def test_suggested_event_skipped_when_it_overlaps_an_existing_event():
+    import render_briefing as r
+    liked = {"relevance": {"score": 11, "evidence": "include", "why": "x"}}
+    cls = {"time": "2:00 PM", "end_time": "3:15 PM", "title": "CMSC131", "course_label": "CMSC131"}
+    def sug(t, title):
+        return r._as_schedule_entry(dict(liked, title=title, time=t))
+    html = r._build_schedule([cls], [sug("2:30 PM", "Overlap"), sug("3:15 PM", "After"),
+                                     sug("1:30 PM", "Clips class start")])
+    assert "Overlap" not in html and "Clips class start" not in html
+    assert "After" in html
+
+
+def test_calendar_rows_say_when_they_end_so_the_page_can_grey_them():
+    """2026-10-02: read at 2:30 PM, the 12:40 and 1:00 PM rows still read
+    as what's next. Each timed row carries its end; a travel-gap note ends
+    when the event after it starts."""
+    import datetime as dt
+    import render_briefing as r
+    rows = [{"time": "12:40 PM", "end_time": "12:58 PM", "title": "Leave"},
+            {"gap": "15 minutes", "tight": True},
+            {"time": "1:00 PM", "title": "PHIL001 Discussion"},
+            {"time": "All day", "title": "Holiday"}]
+    html = r._build_schedule(rows, (), dt.date(2026, 10, 2))
+    assert 'data-ends="2026-10-02T12:58:00-04:00"' in html
+    assert 't-gap" data-ends="2026-10-02T13:00:00-04:00"' in html
+    assert 'data-ends="2026-10-02T14:00:00-04:00"' in html  # an hour by default
+    assert html.count("data-ends") == 3
+    assert "data-ends" not in r._build_schedule(rows)
+
+
+def test_leads_past_the_shown_cap_sit_in_a_collapsed_disclosure():
+    """2026-10-02: "Top 3 of 26 open" gave no way to see the other 23. The
+    rest now render inside details.more.leads-more, still as lead rows."""
+    import copy
+    import render_briefing as r
+    base = SPEC["sections"]["leads"][0]
+    leads = []
+    for n in range(5):
+        lead = copy.deepcopy(base)
+        lead["id"] = "lead-extra-%d" % n
+        lead["title"] = "Lead number %d" % n
+        leads.append(lead)
+
+    def page(shown, rest):
+        spec = copy.deepcopy(SPEC)
+        spec["sections"]["leads"] = shown
+        spec["sections"]["leads_more"] = rest
+        return r.build(spec, TPL)
+
+    out, problems = page(leads[:3], leads[3:])
+    assert not problems, problems
+    sec = r._section(out, "section-leads")
+    head, _, tail = sec.partition('<details class="more leads-more">')
+    assert tail and "2 more leads" in tail.split("</summary>")[0]
+    assert head.count('data-kind="lead"') == 3
+    assert tail.count('data-kind="lead"') == 2
+    for lead in leads[3:]:
+        assert lead["id"] in tail and lead["id"] not in head
+    out, problems = page(leads[:3], [])
+    assert not problems, problems
+    assert "leads-more" not in out
+
+
+def test_email_sourced_opportunity_names_the_email_not_an_application_page():
+    from render_briefing import _source_label
+    assert _source_label(
+        "https://mail.google.com/mail/u/0/#inbox/abc") == "Open the email"
+    assert _source_label("https://careers.example.org/job/9") == \
+        "Open the application page"
+    assert _source_label("") == "Open the application page"
+
+
+def test_shown_title_drops_only_the_items_own_due_date():
+    from render_briefing import shown_title
+    assert shown_title("W6 Homework Due October 20 / Critical Issues Grid",
+                       "2026-10-20") == "W6 Homework / Critical Issues Grid"
+    assert shown_title("Homework Due Oct. 6/ Bromley Article",
+                       "2026-10-06") == "Homework / Bromley Article"
+    assert shown_title("Reading Response (due Mon, Oct 19)",
+                       "2026-10-19") == "Reading Response"
+    assert shown_title("Lab 3 - Due Oct 22 - Circuits",
+                       "2026-10-22") == "Lab 3: Circuits"
+    # A different date says something the row does not; keep it.
+    assert shown_title("Essay due Oct 20", "2026-10-21") == "Essay due Oct 20"
+    # Nothing left but the date, no date, or no "due": unchanged.
+    assert shown_title("Due Oct 20", "2026-10-20") == "Due Oct 20"
+    assert shown_title("Essay due Oct 20", None) == "Essay due Oct 20"
+    assert shown_title("TCP/IP quiz", "2026-10-22") == "TCP/IP quiz"

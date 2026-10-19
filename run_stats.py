@@ -25,7 +25,7 @@ ALWAYS = (
     # Step 0's credential check, the sweep, and both Drive writes (§1.9).
     # Counted here and not in extra_modules because there is no run that
     # skips it: a run with no mail and no Drive still calls health().
-    "google_api.py",
+    "briefing_google.py",
     # Step 6's maintenance and step 7's routing; step 4's arithmetic. Both run
     # on every run, including a paused one — a paused run still publishes.
     "lifecycle.py",

@@ -4,7 +4,7 @@ architecture proposal, sections F and G, for the full design this
 implements).
 
 What this is: a standalone, READ-ONLY tool that reads canvas-scraper's
-index (~/canvas-scraper/output/latest.json + cache.db) and this project's
+index (~/projects/canvas-scraper/output/latest.json + cache.db) and this project's
 own briefing.db `items` table, and reports how well the two sources agree
 for assignment/assessment items -- Phase B/C of the staged migration
 (compare the scraper against the existing Canvas-notification-email path
@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-CANVAS_SCRAPER_ROOT = Path.home() / "canvas-scraper"
+CANVAS_SCRAPER_ROOT = Path.home() / "projects" / "canvas-scraper"
 CANVAS_LATEST_JSON = CANVAS_SCRAPER_ROOT / "output" / "latest.json"
 CANVAS_CACHE_DB = CANVAS_SCRAPER_ROOT / "cache.db"
 BRIEFING_DB = Path(__file__).resolve().parent / "briefing.db"
@@ -63,7 +63,7 @@ def _parse_date(d: Optional[str]) -> Optional[_dt.date]:
 def load_canvas_scrape(path: Path = CANVAS_LATEST_JSON) -> dict:
     if not path.exists():
         raise NoCanvasScrapeError(
-            f"No canvas-scraper output at {path}. Run `canvas refresh` in ~/canvas-scraper first."
+            f"No canvas-scraper output at {path}. Run `canvas refresh` in ~/projects/canvas-scraper first."
         )
     return json.loads(path.read_text())
 
@@ -248,7 +248,8 @@ def _due_date_and_time(due_at: Optional[str], tz) -> tuple[Optional[str], Option
 
 
 
-def canvas_submission_summary(submission: Optional[dict]) -> dict:
+def canvas_submission_summary(submission: Optional[dict],
+                              as_of: Optional[str] = None) -> dict:
     """Canvas's own record of whether this student is DONE with an object,
     reduced to the three facts the briefing acts on (2026-09-19 audit).
 
@@ -260,6 +261,11 @@ def canvas_submission_summary(submission: Optional[dict]) -> dict:
     grade-trend readout's job, not "may have been missed".
     `missing` -- Canvas's own missing flag, the strongest overdue signal
     there is (set by Canvas, not inferred from a date by this pipeline).
+    `as_of` -- the scrape's `scraped_at`, when known. An "unsubmitted" read
+    taken before the due time says nothing about whether the work was
+    handed in (2026-09-24: a failed morning refresh left the previous
+    day's pre-deadline scrape in place, and on-time submissions were
+    called missed).
     """
     s = submission or {}
     state = s.get("workflow_state")
@@ -267,9 +273,12 @@ def canvas_submission_summary(submission: Optional[dict]) -> dict:
         state in ("submitted", "graded", "pending_review")
         or s.get("submitted_at") or s.get("score") is not None
         or s.get("excused"))
-    return {"state": state, "settled": settled,
-            "missing": bool(s.get("missing")),
-            "excused": bool(s.get("excused"))}
+    out = {"state": state, "settled": settled,
+           "missing": bool(s.get("missing")),
+           "excused": bool(s.get("excused"))}
+    if as_of:
+        out["as_of"] = as_of
+    return out
 
 
 def scrape_age_hours(scrape: dict, now: Optional[_dt.datetime] = None) -> Optional[float]:
@@ -315,6 +324,7 @@ def canvas_authoritative_candidates(scrape: Optional[dict] = None, tz=None) -> l
 
         tz = ZoneInfo("America/New_York")
     scrape = scrape if scrape is not None else load_canvas_scrape()
+    as_of = scrape.get("scraped_at")
     out = []
     for bundle in scrape.get("courses", []):
         code = _course_code(bundle["course"])
@@ -349,7 +359,8 @@ def canvas_authoritative_candidates(scrape: Optional[dict] = None, tz=None) -> l
                     # item's own detail) can inspect it, not to decide once
                     # and discard the evidence.
                     "submission_types": a.get("submission_types") or [],
-                    "canvas_submission": canvas_submission_summary(a.get("submission")),
+                    "canvas_submission": canvas_submission_summary(
+                        a.get("submission"), as_of),
                     "points_possible": a.get("points_possible"),
                 }
             )
@@ -383,10 +394,11 @@ def canvas_authoritative_candidates(scrape: Optional[dict] = None, tz=None) -> l
                     "submission_types": [q["quiz_type"]] if q.get("quiz_type") else [],
                     # A quiz object carries no submission, but `attempts_taken`
                     # is Canvas's own count of finished attempts.
-                    "canvas_submission": {
-                        "state": None,
-                        "settled": bool(q.get("attempts_taken")),
-                        "missing": False, "excused": False},
+                    "canvas_submission": dict(
+                        {"state": None,
+                         "settled": bool(q.get("attempts_taken")),
+                         "missing": False, "excused": False},
+                        **({"as_of": as_of} if as_of else {})),
                     "points_possible": q.get("points_possible"),
                 }
             )

@@ -19,6 +19,7 @@ import canvas_shadow
 import db as dbmod
 import orchestrator as O
 import render_briefing
+import sources
 import state_io_sqlite
 import weather
 
@@ -31,7 +32,8 @@ def _run(dry=True, db_path=":memory:"):
 
 def _ctx(items=None, **extra):
     ctx = {"state": {"items": items or [], "courses": {"MATH001": {"class": "math"}}},
-           "today": TODAY}
+           "today": TODAY,
+           "now_et": _dt.datetime.combine(TODAY, _dt.time(10, 0), tzinfo=O.TZ)}
     ctx.update(extra)
     return ctx
 
@@ -263,6 +265,43 @@ class TestNearDuplicates:
               "source_refs": [{"source": "canvas_scraper"}]}
         assert O._near_duplicates([ph, hw], TODAY) == {"ph"}
 
+    def test_placeholder_hidden_when_canvas_twin_already_handled(self):
+        """2026-09-29: user handled "HW Chap 06"; the placeholder came back."""
+        ph = {"id": "ph", "course": "ECON001", "course_label": "ECON001",
+              "kind": "assignment", "title": "Weekly Homework (Chapter HW)",
+              "date": "2026-09-29", "status": "new",
+              "source_refs": [{"source": "gcal_syllabi"}]}
+        hw = {"id": "hw6", "course": "ECON001", "course_label": "ECON001",
+              "kind": "assignment", "title": "HW Chap 06",
+              "date": "2026-09-29", "status": "handled",
+              "source_refs": [{"source": "canvas_scraper"}]}
+        assert O._near_duplicates([ph, hw], _dt.date(2026, 9, 29)) == {"ph"}
+
+    def test_placeholder_yields_to_canvas_homework_moved_off_its_day(self):
+        """2026-10-02: "Homework Due (weekly)" showed on Tue 10/6 (exam
+        day); Canvas had moved that week's HW Chap 07/08 to Fri 10/9."""
+        ph = {"id": "ph", "course": "ECON001", "course_label": "ECON001",
+              "kind": "assignment", "title": "Homework Due (weekly)",
+              "date": "2026-10-06", "status": "new",
+              "source_refs": [{"source": "gcal_syllabi"}]}
+        hw = {"id": "hw7", "course": "ECON001", "course_label": "ECON001",
+              "kind": "assignment", "title": "HW Chap 07",
+              "date": "2026-10-09", "status": "ongoing",
+              "source_refs": [{"source": "canvas_scraper"}]}
+        today = _dt.date(2026, 10, 2)
+        assert O._near_duplicates([ph, hw], today) == {"ph"}
+        far = dict(hw, date="2026-10-13")
+        assert O._near_duplicates([ph, far], today) == set()
+        other = dict(hw, course="MATH001", course_label="MATH001")
+        assert O._near_duplicates([ph, other], today) == set()
+
+    def test_open_row_hidden_when_twin_dismissed(self):
+        a = {"id": "a", "course_label": "CMSC001", "course": "CMSC001",
+             "kind": "assignment", "title": "Coding Project 1 due",
+             "date": "2026-09-29", "status": "dismissed"}
+        b = dict(a, id="b", title="Project #1: Drawing App", status="new")
+        assert O._near_duplicates([a, b], _dt.date(2026, 9, 29)) == {"b"}
+
     def test_distinct_items_kept(self):
         a = {"id": "a", "course_label": "PHIL001", "kind": "assessment",
              "title": "Quiz 3", "date": "2026-09-25", "status": "new"}
@@ -288,6 +327,17 @@ class TestTldr:
             "course": "MATH001", "title": "Midterm Exam 1", "when": "Friday"}))
         assert "MATH001 Midterm Exam 1 is Friday" in t
 
+    def test_next_due_drops_a_due_date_the_row_already_shows(self):
+        # 2026-10-17 headline: "next up is ENGL001 W6 Homework Due October 20
+        # / Critical Issues Grid on Tuesday".
+        row = {"id": "w6", "course_label": "ENGL001", "kind": "assignment",
+               "title": "W6 Homework Due October 20 / Critical Issues Grid",
+               "date": "2026-10-20"}
+        e = O._next_of([row], _dt.date(2026, 10, 17))
+        assert e["title"] == "W6 Homework / Critical Issues Grid"
+        assert O._prep_row(row, _dt.date(2026, 10, 17))["title"] == e["title"]
+        assert row["title"].startswith("W6 Homework Due October 20")
+
 
 def test_plain_text_strips_markup_keeps_links():
     html = ('<html><head><style>.x{color:red}</style></head><body><p>Exam '
@@ -300,25 +350,49 @@ def test_plain_text_strips_markup_keeps_links():
 
 # --- delivery ------------------------------------------------------------------
 
+def _today_db(tmp_path, attempts):
+    """A db in which today's build has started `attempts` times and failed."""
+    path = str(tmp_path / "b.db")
+    dbmod.init_db(path)
+    now = _dt.datetime.combine(TODAY, _dt.time(10, 0), tzinfo=O.TZ)
+    for _ in range(attempts):
+        sources.record_build_attempt(path, now)
+    return path
+
+
 class TestDelivery:
-    def test_failed_publish_sends_failure_notice_not_the_summary(self, monkeypatch):
+    def test_failed_publish_sends_failure_notice_once_retries_run_out(
+            self, monkeypatch, tmp_path):
         sent = {}
 
         def fake_send(line, url, today, root=""):
             sent["line"] = line
             return {"sent": True}
-        monkeypatch.setattr(O.google_api, "send_daily_briefing_email", fake_send)
-        run = _run(dry=False)
+        monkeypatch.setattr(O.briefing_google, "send_daily_briefing_email", fake_send)
+        run = _run(dry=False, db_path=_today_db(tmp_path, sources.BUILD_ATTEMPTS_PER_DAY))
         ctx = _ctx(is_repeat=False)
         ctx["state"]["last_completed_date"] = "2026-09-18"
         d = O.step10_deliver(run, ctx, "All good today.", "https://x", published=False)
         assert "could not be built" in sent["line"] and "2026-09-18" in sent["line"]
         assert d["drive"] is False
 
+    def test_failed_publish_waits_for_the_retry_before_emailing(
+            self, monkeypatch, tmp_path):
+        """2026-10-10: the day's one email must not announce a failure that
+        the next retry may fix."""
+        sent = []
+        monkeypatch.setattr(O.briefing_google, "send_daily_briefing_email",
+                            lambda *a, **k: sent.append(a) or {"sent": True})
+        run = _run(dry=False, db_path=_today_db(tmp_path, 1))
+        d = O.step10_deliver(run, _ctx(is_repeat=False), "All good today.",
+                             "https://x", published=False)
+        assert sent == [] and d["email"] is False
+        assert any("retry is scheduled" in e["message"] for e in run.errors)
+
     def test_send_exception_never_escapes(self, monkeypatch):
         def boom(*a, **k):
             raise OSError("network down")
-        monkeypatch.setattr(O.google_api, "send_daily_briefing_email", boom)
+        monkeypatch.setattr(O.briefing_google, "send_daily_briefing_email", boom)
         monkeypatch.setattr(O.google_api, "folder_ok", lambda *a, **k: False)
         run = _run(dry=False)
         d = O.step10_deliver(run, _ctx(is_repeat=False), "x", "https://x")
@@ -396,3 +470,22 @@ def test_lead_basis_not_cut_mid_word_and_source_not_repeated():
     claim = ("word " * 70).strip()[:300]
     out = render_briefing._clip_claim(claim)
     assert out.endswith("…") and not out[:-1].endswith("wor")
+
+
+class TestHomepageLeadRetirement:
+    """A federal scholarship (2026-09-29): a real program whose whole site is its front
+    page was retired as "a homepage" though it carried a deadline."""
+
+    def _lead(self, **kw):
+        return {"id": "l", "regime": "lead", "status": "open",
+                "source_url": "https://scholarship.example.org/", **kw}
+
+    def test_bare_homepage_lead_is_retired(self):
+        it = self._lead()
+        O._retire_homepage_leads(_run(), [it])
+        assert it["status"] == "expired"
+
+    def test_homepage_lead_with_deadline_is_kept(self):
+        it = self._lead(act_by="2026-12-04")
+        O._retire_homepage_leads(_run(), [it])
+        assert it["status"] == "open"

@@ -5,7 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=%h/daily-briefing/service/run_daily.sh
+ExecStart=%h/projects/daily-briefing/service/run_daily.sh
 # Canvas refresh (<=15 min) + LLM calls + render; generous but bounded.
 TimeoutStartSec=45min
 Nice=5

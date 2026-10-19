@@ -92,6 +92,10 @@ def _local_date(iso, tz):
     return dt.astimezone(tz).date()
 
 
+def _pts(x):
+    return ("%.2f" % x).rstrip("0").rstrip(".")
+
+
 def _short_day(d, today):
     if d is None:
         return ""
@@ -113,6 +117,20 @@ def baseline(db_path, today, now_epoch):
     else:
         since = now_epoch - FIRST_RUN_LOOKBACK_HOURS * 3600
     return since, {"date": today.isoformat(), "since": since}
+
+
+def last_checked(cache_db):
+    """Epoch seconds of canvas-scraper's latest scrape run (run_log), or None.
+    A scrape with no changes writes no change_log row, so this is the only
+    stamp that says when Canvas was last looked at."""
+    if not Path(cache_db).exists():
+        return None
+    conn = sqlite3.connect("file:%s?mode=ro" % cache_db, uri=True)
+    try:
+        row = conn.execute("SELECT MAX(run_at) FROM run_log").fetchone()
+    finally:
+        conn.close()
+    return float(row[0]) if row and row[0] else None
 
 
 def read_changes(cache_db, since):
@@ -169,13 +187,19 @@ def build(rows, scrape, code_to_label, tz, today):
     Pure: no I/O, no model."""
     code_by_id = {b["course"]["id"]: (b["course"].get("course_code") or "")
                   for b in (scrape or {}).get("courses", [])}
+    # change_log rows carry no score; the scrape's own submission does, when
+    # the instructor has posted one. "Graded" rows show it.
+    scores = {(b["course"]["id"], str(a.get("id"))): (
+                  (a.get("submission") or {}).get("score"), a.get("points_possible"))
+              for b in (scrape or {}).get("courses", [])
+              for a in b.get("assignments") or []}
     anns = _announcement_texts(scrape)
     groups = {}
 
     def add(code, entry):
         groups.setdefault(code, []).append(entry)
 
-    files_new, pages_new, pages_changed = {}, {}, {}
+    files_new, pages_new, pages_changed, work_new = {}, {}, {}, {}
     for r in _latest_per_object(rows):
         code = code_to_label.get(code_by_id.get(r["course_id"], ""))
         if not code:
@@ -187,6 +211,7 @@ def build(rows, scrape, code_to_label, tz, today):
             a = anns.get(r["id"], {})
             add(code, {"label": "Announcement", "text": title,
                        "url": a.get("url") or url, "ann_id": r["id"],
+                       "posted": a.get("posted_at"),
                        "body": a.get("text") or ""})
         elif t == "file" and kind == "new":
             name = after.get("display_name") or title
@@ -202,10 +227,12 @@ def build(rows, scrape, code_to_label, tz, today):
         elif t in ("assignment", "quiz", "discussion"):
             name = (after.get("name") or after.get("title") or title).strip()
             if kind == "new":
+                # A graded discussion is both an assignment and a discussion
+                # of one name; list it once, with the copy that has a due date.
                 due = _local_date(after.get("due_at"), tz)
-                add(code, {"label": "New", "text": name + (
-                    " · due %s" % _short_day(due, today) if due else ""),
-                    "url": url})
+                seen = work_new.setdefault(code, {}).get(name.lower())
+                if seen is None or (due and not seen[1]):
+                    work_new[code][name.lower()] = (name, due, url)
             elif kind == "changed":
                 if before.get("due_at") != after.get("due_at") and \
                         after.get("due_at"):
@@ -217,10 +244,18 @@ def build(rows, scrape, code_to_label, tz, today):
                         "url": url})
                 elif after.get("completion_state") == "graded" and \
                         before.get("completion_state") != "graded":
+                    score, points = scores.get((r["course_id"], r["id"]), (None, None))
+                    if score is not None and points:
+                        name = "%s · %s/%s" % (name, _pts(score), _pts(points))
                     add(code, {"label": "Graded", "text": name, "url": url})
         elif t == "announcement":
             continue
 
+    for code, work in work_new.items():
+        for name, due, url in work.values():
+            add(code, {"label": "New", "text": name + (
+                " · due %s" % _short_day(due, today) if due else ""),
+                "url": url})
     for code, files in files_new.items():
         names = [n for n, _ in files]
         shown = ", ".join(names[:MAX_FILES_LISTED])

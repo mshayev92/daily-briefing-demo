@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# The unattended daily run: refresh Canvas -> build + deliver the briefing
-# -> back up the state DB. Invoked by systemd (systemd/daily-briefing.timer);
-# safe to run by hand too.
+# The unattended run: refresh due scrapers -> build + deliver the briefing
+# -> back up the state DB. Two timers invoke it (service/systemd/):
+#   run_daily.sh          06:30 morning build (daily-briefing.timer)
+#   run_daily.sh --tick   every 15 min: refresh what the Sources settings
+#                         say is due, rebuild if anything new came in
+#                         (briefing-sources.timer)
+# Safe to run by hand too.
 #
 # Until the 2026-09-19 audit NOTHING scheduled this pipeline: every briefing
 # ever delivered was a hand-started `orchestrator.py --live`, and
@@ -18,7 +22,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(dirname "$HERE")"
 PY="$ROOT/venv/bin/python"
 LOG_DIR="$ROOT/logs"
-CANVAS_DIR="${CANVAS_SCRAPER_DIR:-$HOME/canvas-scraper}"
+MODE=morning
+[ "${1:-}" = "--tick" ] && MODE=tick
 mkdir -p "$LOG_DIR"
 
 # `claude` (the orchestrator's LLM calls) lives in ~/.local/bin; systemd's
@@ -28,47 +33,61 @@ export TZ="America/New_York"
 
 exec >>"$LOG_DIR/daily-$(date +%F).log" 2>&1
 
-# One run at a time: a manual run and the timer must never interleave (two
+# One run at a time: a manual run and the timers must never interleave (two
 # concurrent wholesale state saves would each discard the other's work).
+# The morning build waits for a tick in progress (a Canvas refresh can take
+# 15 min); a tick that finds the lock taken just skips its turn.
 exec 9>"$LOG_DIR/.daily.lock"
-if ! flock -n 9; then
-    echo "$(date -Is) another run holds the lock -- exiting"
+if [ "$MODE" = tick ]; then flock -n 9; else flock -w 2400 9; fi || {
+    echo "$(date -Is) another run holds the lock -- exiting ($MODE)"
     exit 0
-fi
+}
 
-echo "=== $(date -Is) daily briefing run"
+# A tick that finds nothing due stays out of the log.
+[ "$MODE" = morning ] && echo "=== $(date -Is) daily briefing run (morning)"
 
-# 1. Canvas refresh -- best effort. The scraper drives a headed browser, so
-#    it needs an X display; reuse :99 when an Xvfb is already serving it,
-#    otherwise start a private one for the duration. A failure (expired
-#    Canvas login, network) is logged and the briefing proceeds on the last
-#    scrape -- the orchestrator itself flags the data as stale when it is.
-if [ "${SKIP_CANVAS_REFRESH:-0}" != "1" ] && [ -x "$CANVAS_DIR/.venv/bin/python" ]; then
-    XVFB_PID=""
-    if ! pgrep -f "Xvfb :99" >/dev/null 2>&1; then
-        if command -v Xvfb >/dev/null 2>&1; then
-            Xvfb :99 -screen 0 1280x720x24 >/dev/null 2>&1 &
-            XVFB_PID=$!
-            sleep 2
-        fi
-    fi
-    echo "--- canvas refresh"
-    (cd "$CANVAS_DIR" && DISPLAY=:99 timeout 900 .venv/bin/python -m canvas_scraper.cli.run) \
-        && echo "canvas refresh ok" \
-        || echo "canvas refresh FAILED (exit $?) -- continuing with the last scrape"
-    [ -n "$XVFB_PID" ] && kill "$XVFB_PID" 2>/dev/null
-fi
-
-# 2. The briefing itself.
-echo "--- orchestrator --live"
+# 1. Scrapers (canvas-scraper, handshake-scraper) that are due under the
+#    page's Sources settings (sources.py). Best effort: a failure (expired
+#    UMD login, network) is recorded for the Sources sheet and the brief
+#    proceeds on the last scrape -- the orchestrator flags stale data.
+#    A tick builds the page only when something new came in or a pipeline
+#    source is due, and never before the morning build (which sends the
+#    day's email).
 cd "$HERE" || exit 1
-"$PY" orchestrator.py --live
+if [ "$MODE" = "tick" ]; then
+    "$PY" sources.py tick
+    want=$?
+    # Deadlines approach whether or not anything is due: check on every tick,
+    # before the early exit. Never affects the exit status.
+    "$PY" notify.py run || echo "notify FAILED (exit $?)"
+    [ "$want" = 10 ] && exit 0
+    [ "$want" = 0 ] || { echo "sources tick FAILED (exit $want)"; exit "$want"; }
+    echo "=== $(date -Is) tick: rebuilding with new data"
+elif [ "${SKIP_CANVAS_REFRESH:-0}" != "1" ]; then
+    "$PY" sources.py refresh || echo "sources refresh FAILED (exit $?)"
+fi
+
+# 2. The briefing itself, fetching only the sources that are due.
+echo "--- orchestrator --live --due-only"
+"$PY" sources.py attempt
+"$PY" orchestrator.py --live --due-only
 rc=$?
 echo "orchestrator exit $rc"
 
-# 3. Off-machine backup of the post-run state (Drive). Never affects rc.
-echo "--- backup"
-"$PY" backup.py || echo "backup FAILED (exit $?)"
+# 2b. App notifications after the build: the events its new data produced,
+#     and the brief-ready push once the day's page has published. notify.py
+#     checks the publish itself, so a build that fails here sends no brief,
+#     and a retry that publishes later does. Best effort.
+"$PY" notify.py run || echo "notify FAILED (exit $?)"
+
+# 3. Off-machine backup of the post-run state (Drive), once a day: Drive
+#    keeps the 14 newest, so hourly rebuilds would push out two weeks of
+#    history. Never affects rc.
+STAMP="$LOG_DIR/.last_backup_date"
+if [ "$(cat "$STAMP" 2>/dev/null)" != "$(date +%F)" ]; then
+    echo "--- backup"
+    "$PY" backup.py && date +%F >"$STAMP" || echo "backup FAILED (exit $?)"
+fi
 
 # Keep a month of daily logs.
 find "$LOG_DIR" -maxdepth 1 -name 'daily-*.log' -mtime +30 -delete 2>/dev/null

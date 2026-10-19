@@ -27,7 +27,9 @@ MAX_PER_RUN = 3
 PAGE_CHARS = 12000
 FETCH_TIMEOUT = 15
 FETCH_MAX_BYTES = 600_000
-DOSSIER_VERSION = 4
+# 5 (2026-09-25): the profile lists only active goals, so every "Claude's read"
+# written against the switched-off research goal is redone.
+DOSSIER_VERSION = 5
 REFRESH_DAYS = 7
 _UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like "
        "Gecko) Chrome/126.0 Safari/537.36")
@@ -281,8 +283,10 @@ def profile_text(state):
     goals = [g.replace("_", " ") for g in answers.get("goals") or ()]
     topics = [t.replace("-", " ") for t, v in (answers.get("topics") or {}).items()
               if v == "always"]
+    # Active goals only: one he switched off must not shape "Claude's read".
     reqs = [r.get("statement") for r in (state.get("requirements") or {}
-                                         ).get("entries") or () if r.get("statement")]
+                                         ).get("entries") or ()
+            if r.get("statement") and r.get("active", True)]
     custom = ((prefs.get("custom") or {}).get("text") or "").strip()
     parts = ["University of Maryland undergraduate"]
     if courses:

@@ -432,6 +432,22 @@ class ActionTagTest(unittest.TestCase):
         self.assertEqual(L.action_tag(it), L.ACTION_TAGS["submit"])
 
 
+    def test_canvas_discussion_post_is_submit_not_in_class(self):
+        """2026-09-24: "Discussion Post 3" is a written post on Canvas."""
+        it = item("d3", title="Discussion Post 3",
+                  submission_types=["discussion_topic"])
+        self.assertEqual(L.action_tag(it), L.ACTION_TAGS["submit"])
+
+    def test_discussion_title_without_canvas_data_is_submit(self):
+        it = item("d4", title="W1 Homework: Le Cunff Article discussion reply")
+        self.assertEqual(L.action_tag(it), L.ACTION_TAGS["submit"])
+
+    def test_participation_with_online_type_is_submit(self):
+        it = item("p5", title="Participation 5",
+                  submission_types=["online_text_entry"])
+        self.assertEqual(L.action_tag(it), L.ACTION_TAGS["submit"])
+
+
 class IsFyiTest(unittest.TestCase):
     """lifecycle.is_fyi() (§16c, 2026-09-18) -- reproduces the real Further
     out review: an application/registration deadline wearing an `event`
@@ -1088,6 +1104,59 @@ class CanvasOverdueTest(unittest.TestCase):
         self.assertIsNone(L.section_for(it, TODAY))
 
 
+    # 2026-09-24 brief: four rows in Needs your attention, all handed in on
+    # time. Each case below is one of them.
+
+    def test_canvas_read_taken_before_the_deadline_is_not_a_miss(self):
+        """Peer Instruction 3: the morning refresh failed, so the only
+        Canvas read was the previous morning's, hours before the due time."""
+        it = item("pi3", days=-1, time="16:00", course="MATH001",
+                  submission_types=["online_upload"],
+                  canvas_submission={"settled": False, "missing": False,
+                                     "as_of": "%sT10:32:00Z" % (
+                                         TODAY - timedelta(days=1))})
+        _, rep = L.run([it], TODAY)
+        self.assertEqual(rep["overdue"], [])
+
+    def test_canvas_read_after_the_deadline_still_flags(self):
+        it = item("hw", days=-1, time="16:00", course="MATH001",
+                  submission_types=["online_upload"],
+                  canvas_submission={"settled": False, "missing": False,
+                                     "as_of": "%sT10:32:00Z" % TODAY})
+        _, rep = L.run([it], TODAY)
+        self.assertEqual(rep["overdue"], ["hw"])
+
+    def test_in_class_clicker_activity_is_not_flagged(self):
+        it = item("pi", days=-1, title="Peer Instruction 3",
+                  submission_types=["external_tool"],
+                  canvas_submission={"settled": False, "missing": False})
+        _, rep = L.run([it], TODAY)
+        self.assertEqual(rep["overdue"], [])
+
+    def test_email_copy_of_canvas_tracked_work_is_not_flagged(self):
+        """ECON001 "Homework 4" (email) is Canvas's "HW Chap 04", graded
+        before the deadline; the title match can't see that. Canvas's own
+        row carries the verdict for any course Canvas covers."""
+        canvas_row = item("hw-chap-04", days=-2, course="ECON001",
+                          status="handled",
+                          canvas_submission={"settled": True})
+        email_row = item("homework-4", days=-1, course="ECON001")
+        syllabus_row = item("weekly-hw", days=-2, course="ECON001",
+                            title="Weekly Homework (Chapter HW)")
+        other = item("essay", days=-1, course="HIST200")
+        _, rep = L.run([canvas_row, email_row, syllabus_row, other], TODAY)
+        self.assertEqual(rep["overdue"], ["essay"])
+
+    def test_email_copy_flagged_earlier_is_retracted(self):
+        canvas_row = item("c", days=3, course="ECON001",
+                          canvas_submission={"settled": False})
+        flagged = item("homework-5", days=-1, course="ECON001",
+                       status="unresolved", overdue_flagged=True,
+                       needs_attention=True)
+        _, rep = L.run([canvas_row, flagged], TODAY)
+        self.assertEqual(rep["overdue_retracted"], ["homework-5"])
+
+
 class RecordSurfacedTest(unittest.TestCase):
     def test_counts_once_per_day(self):
         it = item("a1", times_surfaced=2, last_shown="2026-01-01")
@@ -1116,3 +1185,30 @@ class RecordSurfacedTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class DatelessExpiredPruneTest(unittest.TestCase):
+    """2026-10-10: expired leads have no date, so only last_shown ages them.
+    compact_and_prune aged dismissed and handled rows that way but not expired
+    ones, so 18 expired leads were never pruned."""
+
+    def _lead(self, last_shown):
+        return {"id": "lead-x", "kind": "lead", "status": "expired",
+                "title": "Lead", "date": None, "last_shown": last_shown}
+
+    def test_expired_lead_off_the_page_for_35_days_is_pruned(self):
+        kept, report = L.compact_and_prune([self._lead("2026-08-01")], TODAY)
+        self.assertEqual(report["deleted"], ["lead-x"])
+        self.assertEqual(kept, [])
+
+    def test_recently_shown_expired_lead_is_kept(self):
+        kept, report = L.compact_and_prune([self._lead("2026-09-01")], TODAY)
+        self.assertEqual(report["deleted"], [])
+        self.assertEqual(len(kept), 1)
+
+    def test_expired_row_never_shown_is_kept(self):
+        """No age evidence, so no deletion: a re-discovered copy of a row
+        that was never on the page would show up again."""
+        kept, report = L.compact_and_prune([self._lead(None)], TODAY)
+        self.assertEqual(report["deleted"], [])
+        self.assertEqual(len(kept), 1)

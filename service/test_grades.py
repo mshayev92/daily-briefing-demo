@@ -3,7 +3,7 @@ Tests for grades.py (STEP 5d, grades + trends, 2026-09-19).
 
 Pure/deterministic, like test_canvas_shadow.py: every function under test
 takes its data as explicit arguments, so nothing here touches the real
-~/canvas-scraper output or the real briefing.db.
+~/projects/canvas-scraper output or the real briefing.db.
 
 Run (from service/):
     ../venv/bin/python -m pytest test_grades.py -q
@@ -11,6 +11,7 @@ Run (from service/):
 
 from __future__ import annotations
 
+import json
 import datetime as _dt
 
 import grades
@@ -74,6 +75,9 @@ class TestAttributeCourses:
         assert facts["gradable_count"] == 3  # A, B, C (D and E excluded)
         assert facts["graded_count"] == 1
         assert facts["missing_count"] == 1
+        assert facts["graded_items"] == [["A", 9.0, 10]]
+        row = grades.snapshot_row("PHIL001", facts, "2026-10-17T00:00:00Z")
+        assert json.loads(row["graded_items"]) == [["A", 9.0, 10]]
 
     def test_locked_but_scored_assignment_still_counts_as_graded(self):
         """The real bug found against the live account, 2026-09-19: a
@@ -120,6 +124,11 @@ class TestGradeDisplayText:
             {"gradable_count": 36, "graded_count": 2, "current_score": 91.666})
         assert "91.7%" in text
         assert "2 of 36 graded" in text
+
+    def test_graded_work_with_a_hidden_total_says_so(self):
+        text = grades.grade_display_text(
+            {"gradable_count": 3, "graded_count": 1, "current_score": None})
+        assert text == "1 of 3 graded, no total shown in Canvas"
 
     def test_stale_snapshot_is_dated(self):
         text = grades.grade_display_text(
